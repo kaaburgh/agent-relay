@@ -115,6 +115,24 @@ class StoreTests(unittest.TestCase):
                 ["task_created", "stage_started"],
             )
 
+    def test_failed_migration_rolls_back_schema_and_version(self) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.execute("CREATE VIEW events AS SELECT 1 AS x")
+        conn.commit()
+        conn.close()
+        with self.assertRaises(sqlite3.OperationalError):
+            Store(self.path)
+        check = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 0)
+            self.assertIsNone(
+                check.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'"
+                ).fetchone()
+            )
+        finally:
+            check.close()
+
     def test_unknown_newer_schema_fails_closed(self) -> None:
         conn = sqlite3.connect(self.path)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")

@@ -12,10 +12,10 @@ Python 3.12 package shell, CI/test shell, durable spec, roadmap, handoff and age
 ## R01 — Task/config domain model and CLI skeleton — DONE
 Depends on R00. Typed task/global configuration, YAML/JSON loading/validation, provider/runner/resource shapes, workspace policy, validation-step model, and CLI shells for `task create`, `run`, `status`, `events`, `resume`, `cancel`, `doctor`. Execution commands fail closed until later units. Tests cover valid/invalid parsing and routing.
 
-## R02 — SQLite schema, transactions, and append-only event store — READY
-Depends on R01. Persist tasks/current workflow state, attempts, generations, provider waits/failures, process metadata, artifacts, reviews, validations, leases and semantic events. Acceptance: deterministic schema creation/migration, atomic state+event transactions, append-only event API, rollback/reopen tests.
+## R02 — SQLite schema, transactions, and append-only event store — DONE
+Depends on R01. Persisted tasks/current workflow state plus durable tables for attempts, generations, provider waits/failures, process metadata, artifacts, reviews, validations, resources/leases and semantic events. Versioned migration is atomic, task+event updates are transactional, event rows are protected by append-only DB triggers, and rollback/reopen/newer-schema behavior is tested.
 
-## R03 — Pure workflow state machine and invariants — FUTURE
+## R03 — Pure workflow state machine and invariants — READY
 Depends on R02. Explicit generic lifecycle states and executable invariant checks. Acceptance includes illegal-transition rejection, same-generation candidate/validation/review provenance, and malformed-output fail-closed behavior.
 
 ## R04 — Attempt/artifact layout and immutable attempt records — FUTURE

@@ -40,10 +40,12 @@ class GitWorkspaceTests(unittest.TestCase):
         self.store.close()
 
     @staticmethod
-    def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def _git(
+        repo: Path, *args: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(repo), *args],
-            check=True,
+            check=check,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -99,7 +101,10 @@ class GitWorkspaceTests(unittest.TestCase):
             candidate_sha=sha1,
         )
         self.assertEqual(self.manager.head_sha(reviewer1), sha1)
-        self.assertEqual(self._git(reviewer1, "symbolic-ref", "-q", "HEAD").returncode, 1)
+        self.assertEqual(
+            self._git(reviewer1, "symbolic-ref", "-q", "HEAD", check=False).returncode,
+            1,
+        )
 
         rework_attempt = self.store.allocate_attempt(task_id="task-1", kind="writer", generation=1)
         sha2 = self._commit_writer(workspaces.writer, "candidate two\n", "candidate two")

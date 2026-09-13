@@ -103,9 +103,11 @@ class Store:
             )
         if version == SCHEMA_VERSION:
             return
-        with self._transaction():
+        try:
             self._conn.executescript(
                 """
+                BEGIN IMMEDIATE;
+
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
                     repository TEXT NOT NULL,
@@ -255,9 +257,15 @@ class Store:
                 BEGIN
                     SELECT RAISE(ABORT, 'events are append-only');
                 END;
+
+                PRAGMA user_version = 1;
+                COMMIT;
                 """
             )
-            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
 
     def create_task(
         self,
@@ -306,10 +314,15 @@ class Store:
         generation: int | None = None,
     ) -> TaskRow:
         now = utc_now()
-        current = self.get_task(task_id)
-        next_generation = current.current_generation if generation is None else generation
-        next_candidate = current.current_candidate_sha if candidate_sha is None else candidate_sha
         with self._transaction():
+            row = self._conn.execute(
+                "SELECT current_candidate_sha, current_generation FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFound(task_id)
+            next_generation = int(row["current_generation"]) if generation is None else generation
+            next_candidate = row["current_candidate_sha"] if candidate_sha is None else candidate_sha
             updated = self._conn.execute(
                 """
                 UPDATE tasks

@@ -24,10 +24,10 @@ Depends on R02. SQLite allocates monotonically increasing per-kind attempt numbe
 ## R05 — Managed Git workspace and candidate-generation primitives — DONE
 Depends on R01,R04. Git operations use argv subprocesses without destructive reset/clean. Writer worktrees are dedicated branches rooted at a resolved frozen baseline; dirty/untracked files in the user's source checkout are preserved. Candidate detection requires a clean committed descendant of the frozen baseline. Candidate generation + current task pointer + `candidate_commit_detected` event are recorded atomically and idempotently. Every reviewer generation gets a distinct detached worktree checked out at the exact candidate SHA; existing managed paths fail closed instead of being overwritten. Tests use real temporary Git repositories/worktrees and exercise two candidate generations.
 
-## R06 — Subprocess supervisor foundation — READY
-Depends on R04. Argv-only process launch/supervision, process groups, capture, timestamps, exit status, timeout hooks, sparse liveness and SIGTERM/SIGKILL cleanup tested with real subprocesses.
+## R06 — Subprocess supervisor foundation — DONE
+Depends on R04. Managed processes use argv-only `asyncio.create_subprocess_exec`, dedicated sessions/process groups, durable PID/PGID/timestamps/exit state and redacted command capture. Stdout/stderr are real files. Optional per-stage timeout sends SIGTERM then SIGKILL after grace; explicit termination targets the whole process group. Sparse heartbeat updates liveness metadata without semantic-event spam, no short global timeout is imposed, and launch-recording failure kills the newly started process group. Integration tests use real processes, including descendants and SIGTERM-ignore behavior.
 
-## R07 — Simulated writer provider — FUTURE
+## R07 — Simulated writer provider — READY
 Depends on R05,R06. Declarative fake writer: sleep, modify/commit/no-commit, success/failure/hang/crash/malformed/provider-unavailable/partial-work/completion while supervisor absent. Use real temporary Git semantics where relevant.
 
 ## R08 — Structured review contract and simulated reviewer — FUTURE

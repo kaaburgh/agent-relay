@@ -2,54 +2,50 @@
 
 ## Current checkpoint
 
-Repository bootstrap is complete. The orchestrator itself is not implemented yet.
+Completed: `R00`, `R01`.
 
-Completed:
+Next bounded unit: `R02 — SQLite schema, transactions, and append-only event store`.
 
-- `R00` agent-friendly repository scaffold;
-- Python 3.12 package/CLI shell;
-- durable product contract in `docs/spec.md`;
-- bounded implementation roadmap in `ROADMAP.md`;
-- agent execution rules in `AGENTS.md`;
-- smoke test and basic CI configuration.
+## R01 evidence
 
-Next bounded unit: `R01 — Task/config domain model and CLI skeleton`.
+Implemented:
+
+- frozen typed task/config domain models in `agent_relay/models.py`;
+- YAML/JSON configuration loader in `agent_relay/config.py`;
+- provider config with model/reasoning/executable/options fields and no credential fields;
+- local/SSH runner shapes and named resource capacities;
+- task repository/baseline/writer/review/acceptance/validation/resource/correction/workspace fields;
+- CLI routes for `task create`, `run`, `status`, `events`, `resume`, `cancel`, `doctor`;
+- execution commands deliberately fail closed until durable execution exists;
+- credential-free example task/global config;
+- CI installs package dependencies before tests;
+- durable-unit protocol now treats a successful checkpoint as a continuation point, not an automatic end of the overall agent run.
+
+Acceptance command:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Result during R01 implementation: PASS, 13 tests.
+
+Environment note: local verification ran on Python 3.13.5 with PyYAML 6.0.3; repository/CI target remains Python 3.12 and GitHub CI installs the declared dependency.
 
 ## Current product state
 
-No workflow execution, SQLite persistence, providers, subprocess supervision, leases, simulation, recovery, or shadPS4 integration is claimed yet.
-
-This is intentional: future agents should implement one roadmap unit at a time and leave a tested durable checkpoint after each pass.
+Task/config parsing and CLI routing exist. Workflow execution, SQLite persistence, state machine, attempt artifacts, providers, subprocess supervision, leases, simulation, recovery and shadPS4 integration are not yet claimed.
 
 ## Durable decisions
 
 - Python 3.12 / Linux-first.
-- Deterministic orchestrator; models are bounded workers, never owners of state machine.
-- Simulation-first development. Real Codex/Claude/shadPS4 integration comes only after deterministic integration/recovery behavior is proven.
-- SQLite remains the preferred durable store pending a concrete reason to change it.
-- Bloodborne-specific behavior stays outside orchestration core.
-- No issue tracker is required for task execution or development routing; `ROADMAP.md` is the implementation work queue.
-- No repository license has been selected. Do not add one without explicit maintainer direction.
+- Deterministic orchestrator; models are bounded workers, never state-machine owners.
+- Simulation-first; real Codex/Claude/shadPS4 integration follows deterministic integration/recovery behavior.
+- SQLite remains the durable-store choice.
+- YAML/JSON input is parsed with `yaml.safe_load`/`json.loads`; configuration models intentionally contain no secret/token fields.
+- Runners explicitly reserve `local` and `ssh` kinds so remote validation can be added without changing task shape.
+- Bloodborne-specific behavior remains outside orchestration core.
+- No issue tracker is required for execution/development routing.
 
 ## Handoff protocol
 
-At the end of every roadmap pass, update this file with:
-
-- roadmap unit completed/in progress;
-- exact commands/tests run and their result;
-- new important files/modules;
-- material design decisions;
-- unresolved failures/limitations;
-- exact next `READY` unit.
-
-Do not erase useful history simply to make this file look clean; condense old completed entries only when the durable Git history and roadmap make them redundant.
-
-## Bootstrap verification
-
-Expected basic command after this bootstrap:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The smoke test only verifies that the package shell/version is importable. It does not exercise orchestrator behavior.
+At every roadmap checkpoint, record completed/in-progress unit, exact commands/results, important files/modules, material decisions, unresolved limitations and exact next `READY` unit. Preserve useful history and never mark an acceptance gate complete without evidence.

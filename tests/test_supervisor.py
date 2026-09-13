@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import tempfile
 import time
@@ -61,27 +60,54 @@ class SupervisorTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_timeout_escalates_to_sigkill_when_sigterm_is_ignored(self) -> None:
+    def test_timeout_terminates_long_running_process(self) -> None:
         async def scenario() -> None:
             layout = self.artifacts.create_attempt(task_id="task-1", kind="tool")
             handle = await self.supervisor.start(
                 task_id="task-1",
                 attempt_id=layout.attempt.attempt_id,
-                argv=[
-                    sys.executable,
-                    "-c",
-                    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
-                ],
+                argv=[sys.executable, "-c", "import time; time.sleep(30)"],
                 cwd=self.root,
                 stdout_path=layout.stdout_path,
                 stderr_path=layout.stderr_path,
                 timeout_seconds=0.15,
-                terminate_grace_seconds=0.05,
+                terminate_grace_seconds=0.1,
                 heartbeat_interval=0.03,
             )
             result = await handle.wait()
             self.assertEqual(result.state, "TIMED_OUT")
             self.assertTrue(result.timed_out)
+            self.assertNotEqual(result.returncode, 0)
+
+        asyncio.run(scenario())
+
+    def test_sigterm_ignore_escalates_to_sigkill_after_ready_checkpoint(self) -> None:
+        async def scenario() -> None:
+            ready = self.root / "ready"
+            layout = self.artifacts.create_attempt(task_id="task-1", kind="tool")
+            code = (
+                "import signal,time,pathlib; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+                "time.sleep(30)"
+            )
+            handle = await self.supervisor.start(
+                task_id="task-1",
+                attempt_id=layout.attempt.attempt_id,
+                argv=[sys.executable, "-c", code],
+                cwd=self.root,
+                stdout_path=layout.stdout_path,
+                stderr_path=layout.stderr_path,
+                terminate_grace_seconds=0.05,
+                heartbeat_interval=0.03,
+            )
+            for _ in range(100):
+                if ready.exists():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(ready.exists())
+            result = await handle.terminate()
+            self.assertEqual(result.state, "TERMINATED")
             self.assertTrue(result.forced_kill)
             self.assertNotEqual(result.returncode, 0)
 

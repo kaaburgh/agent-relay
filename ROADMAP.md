@@ -15,10 +15,10 @@ Depends on R00. Typed task/global configuration, YAML/JSON loading/validation, p
 ## R02 — SQLite schema, transactions, and append-only event store — DONE
 Depends on R01. Persisted tasks/current workflow state plus durable tables for attempts, generations, provider waits/failures, process metadata, artifacts, reviews, validations, resources/leases and semantic events. Versioned migration is atomic, task+event updates are transactional, event rows are protected by append-only DB triggers, and rollback/reopen/newer-schema behavior is tested.
 
-## R03 — Pure workflow state machine and invariants — READY
-Depends on R02. Explicit generic lifecycle states and executable invariant checks. Acceptance includes illegal-transition rejection, same-generation candidate/validation/review provenance, and malformed-output fail-closed behavior.
+## R03 — Pure workflow state machine and invariants — DONE
+Depends on R02. Deterministic persisted lifecycle states `READY`, `WORK`, `VALIDATE`, `REVIEW`, `REWORK`, `WAITING_PROVIDER`, `BLOCKED`, `FAILED`, `CANCELLED`, `DONE`; illegal transitions fail closed. `REVIEW`/`DONE`/`REWORK` enforce exact frozen candidate generation/SHA provenance, mandatory validation when configured, valid structured review output, and verdict policy. State writes use compare-and-set expectations inside the SQLite write transaction so stale supervisors cannot overwrite newer task/candidate state.
 
-## R04 — Attempt/artifact layout and immutable attempt records — FUTURE
+## R04 — Attempt/artifact layout and immutable attempt records — READY
 Depends on R02. Per-task/per-attempt durable directories with immutable inputs, command/config snapshots, stdout/stderr, result metadata, timestamps and candidate SHA. Retries allocate new IDs and preserve history/secrets safety.
 
 ## R05 — Managed Git workspace and candidate-generation primitives — FUTURE

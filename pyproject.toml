@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-relay"
+version = "0.1.0"
+description = "Durable deterministic orchestration for long-running coding and research agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agent-relay = "agent_relay.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_relay"]

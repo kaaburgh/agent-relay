@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+Thumbs.db
+*.sqlite
+*.sqlite3
+.agent-relay/

@@ -121,7 +121,8 @@ class SimulatedWriterProvider:
         candidate_sha: str | None = None
         reason: str | None = None
 
-        if invocation.provider_result_path.exists():
+        result_exists = invocation.provider_result_path.exists()
+        if result_exists:
             self.store.register_artifact(
                 task_id=invocation.layout.attempt.task_id,
                 attempt_id=attempt_id,
@@ -132,6 +133,13 @@ class SimulatedWriterProvider:
         if process_result.state not in {"SUCCEEDED", "FAILED"}:
             kind = WriterResultKind.PROCESS_FAILURE
             reason = process_result.state
+        elif not result_exists:
+            if process_result.returncode == 0:
+                kind = WriterResultKind.MALFORMED
+                reason = "writer exited successfully without provider-result.json"
+            else:
+                kind = WriterResultKind.PROCESS_FAILURE
+                reason = f"process exit {process_result.returncode} without provider result"
         else:
             try:
                 raw = invocation.provider_result_path.read_text(encoding="utf-8")
@@ -140,8 +148,12 @@ class SimulatedWriterProvider:
                     raise ValueError("provider result must be an object")
                 payload = dict(parsed)
             except (OSError, json.JSONDecodeError, ValueError) as exc:
-                kind = WriterResultKind.MALFORMED
-                reason = str(exc)
+                if process_result.returncode == 0:
+                    kind = WriterResultKind.MALFORMED
+                    reason = str(exc)
+                else:
+                    kind = WriterResultKind.PROCESS_FAILURE
+                    reason = f"process exit {process_result.returncode}; unreadable result: {exc}"
             else:
                 status = payload.get("status")
                 if status == "provider_unavailable":

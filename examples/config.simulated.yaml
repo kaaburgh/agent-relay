@@ -1,0 +1,16 @@
+writer:
+  provider: simulated
+  model: fake-writer
+reviewer:
+  provider: simulated
+  model: fake-reviewer
+runners:
+  local:
+    kind: local
+  gpu-node:
+    kind: ssh
+    host: gpu.example.invalid
+resources:
+  bloodborne-runtime:
+    capacity: 1
+state_dir: .agent-relay

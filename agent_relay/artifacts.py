@@ -44,8 +44,8 @@ def _safe_segment(value: str, label: str) -> str:
 
 
 def _redact_string(value: str) -> str:
-    value = _INLINE_SECRET.sub(lambda match: f"{match.group(1)}=<redacted>", value)
-    return _BEARER.sub("Bearer <redacted>", value)
+    value = _BEARER.sub("Bearer <redacted>", value)
+    return _INLINE_SECRET.sub(lambda match: f"{match.group(1)}=<redacted>", value)
 
 
 def redact(value: Any, *, key: str | None = None) -> Any:

@@ -1,0 +1,22 @@
+repository: /path/to/repository
+baseline: main
+writer_instructions: >-
+  Implement the requested change and leave a committed candidate.
+validation:
+  - name: unit-tests
+    runner: local
+    argv: [python, -m, unittest, discover, -s, tests, -v]
+    timeout_seconds: 600
+  - name: runtime-check
+    runner: gpu-node
+    argv: [python, tools/run_expensive_validation.py]
+    resources: [bloodborne-runtime]
+review_instructions: >-
+  Independently verify the candidate against acceptance criteria and evidence.
+acceptance_criteria:
+  - configured validation passes for the candidate
+  - independent review gate succeeds
+runtime_resources: [bloodborne-runtime]
+max_correction_rounds: 3
+workspace:
+  mode: managed

@@ -2,82 +2,62 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`.
+Completed: `R00`, `R01`, `R02`, `R03`, `R04`.
 
-Next bounded unit: `R04 — Attempt/artifact layout and immutable attempt records`.
+Next bounded unit: `R05 — Managed Git workspace and candidate-generation primitives`.
 
 ## R01 evidence
 
-Implemented typed task/global config models, YAML/JSON loading, provider/runner/resource/workspace/validation shapes, credential-free examples and CLI routing for `task create`, `run`, `status`, `events`, `resume`, `cancel`, `doctor`. Execution commands fail closed until durable execution exists. The durable-unit protocol now treats a successful checkpoint as a continuation point rather than an automatic end of the overall agent run.
+Typed task/global config models, YAML/JSON loading, provider/runner/resource/workspace/validation shapes, credential-free examples and CLI routing exist. Execution commands fail closed until durable execution exists.
 
-Acceptance command:
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-R01 result: PASS, 13 tests.
+Acceptance: `python3 -m unittest discover -s tests -v` — PASS, 13 tests.
 
 ## R02 evidence
 
-Implemented `agent_relay/store.py` with schema version 1 and durable tables for tasks/current state, attempts, candidate generations, processes, artifacts, provider waits, validations, reviews, resources/leases and append-only semantic events.
+`agent_relay/store.py` provides versioned SQLite durable state for tasks, attempts, generations, processes, artifacts, provider waits, validations, reviews, resources/leases and append-only semantic events. Task/state+event writes are transactional; event mutation/deletion is DB-prohibited; failed migrations roll back; newer schemas fail closed.
 
-Important properties:
-
-- schema creation and `PRAGMA user_version` run in one explicit SQLite migration transaction;
-- newer unknown schema versions fail closed;
-- task creation and state update + semantic event append are atomic under `BEGIN IMMEDIATE`;
-- event UPDATE/DELETE is prohibited with SQLite triggers;
-- reopen/reload preserves state and ordered event history;
-- deliberately failed migration proves partial schema/version changes roll back.
-
-Acceptance command:
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-R02 result: PASS, 21 tests. GitHub Actions for final R02 checkpoint `b71073b4da0adfe30c5aedbc9d777ae0825d1910`: PASS.
+Acceptance: PASS, 21 tests. GitHub Actions final R02 checkpoint `b71073b4da0adfe30c5aedbc9d777ae0825d1910`: PASS.
 
 ## R03 evidence
 
-Implemented `agent_relay/workflow.py` with the explicit generic lifecycle:
+`agent_relay/workflow.py` implements the explicit lifecycle and exact candidate/validation/review provenance checks. Malformed review cannot approve; stale evidence cannot approve newer candidates; `REWORK` requires current-candidate `REQUEST_CHANGES`; terminal states cannot regress. Transition commits use compare-and-set expectations for stage + generation/SHA under the SQLite write transaction.
 
-`READY`, `WORK`, `VALIDATE`, `REVIEW`, `REWORK`, `WAITING_PROVIDER`, `BLOCKED`, `FAILED`, `CANCELLED`, `DONE`.
+Acceptance: local PASS, 32 tests. Incremental CI briefly failed when workflow code was published before its matching Store CAS API; commit `df22fd091a048a7f323afe07db4531da59bea8bb` closed the mismatch and CI passed.
 
-Enforced/tested invariants include:
+## R04 evidence
 
-- illegal transitions do not mutate state/history;
-- terminal `DONE`/`FAILED`/`CANCELLED` states do not regress;
-- `REVIEW` requires a frozen candidate generation/SHA and, when configured, successful validation for that exact candidate;
-- `DONE` requires valid structured reviewer output with `APPROVE`/`APPROVE_WITH_FOLLOWUPS` for the current generation/SHA plus matching successful validation when mandatory;
-- malformed reviewer output cannot approve;
-- stale validation or stale review evidence cannot approve a newer candidate;
-- `REWORK` requires a valid `REQUEST_CHANGES` result for the current candidate;
-- persisted transitions survive SQLite reopen;
-- state transition writes use compare-and-set expectations for persisted stage + candidate generation/SHA inside the `BEGIN IMMEDIATE` transaction, preventing a stale supervisor snapshot from overwriting newer durable state.
+Implemented durable attempt/artifact handling:
+
+- SQLite schema version 2 adds DB triggers protecting attempt identity/history and artifact rows from overwrite/delete;
+- per-task/per-kind attempt numbers are allocated under `BEGIN IMMEDIATE`, preventing concurrent retries from reusing the same number;
+- attempt directories are non-reused and created with `exist_ok=False` as `tasks/<task-id>/attempts/<kind>-NNN/`;
+- each attempt preserves `attempt.json`, `inputs.json`, `command.json`, `config.json`, `stdout.log`, `stderr.log`, and a write-once `result.json`;
+- candidate generation/SHA are snapshotted in attempt metadata where applicable;
+- recursive redaction removes obvious sensitive mapping keys, separate CLI secret arguments, inline `key=value` secrets and Bearer credentials before snapshots/DB command/result storage;
+- path components are validated before filesystem use;
+- finalized attempt results cannot be replaced through either ArtifactManager or Store lifecycle APIs.
 
 Acceptance command:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
-R03 local result: PASS, 32 tests. During incremental GitHub commits, CI on `75af937...` failed because workflow code/tests were published before the matching Store CAS interface; commit `df22fd091a048a7f323afe07db4531da59bea8bb` closed that interface mismatch and GitHub Actions passed. The stale-snapshot regression test was then added before declaring the checkpoint complete.
+GitHub Actions on `1520b30756fad88eacd2d71cf36c8c22f14c28d5`: PASS, 39 tests on Python 3.12.14. An earlier run correctly failed because `Authorization=Bearer deadbeef` leaked the trailing token; `1520b307...` fixed the redaction order and the regression test now passes.
 
 ## Current product state
 
-Task/config parsing, CLI routing, SQLite durable state/event history and deterministic persisted workflow policy exist. Attempt artifact management, Git workspaces, provider/tool subprocesses, leases semantics, simulations, restart recovery and shadPS4 integration are not yet claimed.
+Task/config parsing, CLI routing, SQLite durable state/events, persisted workflow invariants, and immutable attempt/evidence layout exist. Managed Git worktrees, subprocess supervision, providers/tools, leases semantics, simulation, restart recovery and real shadPS4 integration are not yet claimed.
 
 ## Durable decisions
 
 - Python 3.12 / Linux-first.
 - Deterministic orchestrator; models are bounded workers, never state-machine owners.
 - Simulation-first; real Codex/Claude/shadPS4 integration follows deterministic integration/recovery behavior.
-- SQLite is the durable store; migrations are versioned/fail-closed and event history is append-only at DB layer.
-- Workflow transitions are optimistic compare-and-set writes against stage + candidate provenance, rather than blind last-writer-wins updates.
-- YAML/JSON configuration models intentionally contain no secret/token fields.
-- `local` and `ssh` runner kinds are reserved in config so remote validation can be added without changing task shape.
+- SQLite migrations are versioned/fail-closed; event and historical artifact identity are protected at DB layer.
+- Workflow transitions use optimistic compare-and-set rather than last-writer-wins.
+- Durable snapshots are redacted before persistence; configuration models contain no credential fields.
+- `local` and `ssh` runner kinds are reserved without embedding remote-cluster semantics.
 - Bloodborne-specific behavior stays outside orchestration core.
 
 ## Handoff protocol

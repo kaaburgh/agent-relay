@@ -90,6 +90,29 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(task.stage_attempt, 0)
             self.assertEqual([e.event_type for e in store.events("task-1")], ["task_created"])
 
+    def test_compare_and_set_rejects_stale_transition_snapshot(self) -> None:
+        with Store(self.path) as store:
+            self._create_task(store)
+            store.update_task_with_event(
+                task_id="task-1",
+                stage="WORK",
+                stage_attempt=1,
+                event_type="stage_started",
+            )
+            with self.assertRaisesRegex(Exception, "stale task state"):
+                store.update_task_with_event(
+                    task_id="task-1",
+                    stage="VALIDATE",
+                    stage_attempt=1,
+                    event_type="validation_started",
+                    expected_stage="READY",
+                    expected_candidate_sha=None,
+                    expected_generation=0,
+                    enforce_expected_candidate=True,
+                )
+            self.assertEqual(store.get_task("task-1").stage, "WORK")
+            self.assertEqual(len(store.events("task-1")), 2)
+
     def test_events_are_append_only_even_for_direct_sql(self) -> None:
         with Store(self.path) as store:
             self._create_task(store)

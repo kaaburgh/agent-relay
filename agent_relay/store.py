@@ -312,15 +312,29 @@ class Store:
         event_payload: Mapping[str, Any] | None = None,
         candidate_sha: str | None = None,
         generation: int | None = None,
+        expected_stage: str | None = None,
+        expected_candidate_sha: str | None = None,
+        expected_generation: int | None = None,
+        enforce_expected_candidate: bool = False,
     ) -> TaskRow:
         now = utc_now()
         with self._transaction():
             row = self._conn.execute(
-                "SELECT current_candidate_sha, current_generation FROM tasks WHERE task_id = ?",
+                "SELECT stage, current_candidate_sha, current_generation FROM tasks WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
             if row is None:
                 raise TaskNotFound(task_id)
+            if expected_stage is not None and row["stage"] != expected_stage:
+                raise StoreError(
+                    f"stale task state: expected stage {expected_stage}, found {row['stage']}"
+                )
+            if expected_generation is not None and int(row["current_generation"]) != expected_generation:
+                raise StoreError(
+                    "stale task state: candidate generation changed before transition commit"
+                )
+            if enforce_expected_candidate and row["current_candidate_sha"] != expected_candidate_sha:
+                raise StoreError("stale task state: candidate SHA changed before transition commit")
             next_generation = int(row["current_generation"]) if generation is None else generation
             next_candidate = row["current_candidate_sha"] if candidate_sha is None else candidate_sha
             updated = self._conn.execute(

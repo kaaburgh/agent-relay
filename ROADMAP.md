@@ -18,10 +18,10 @@ Depends on R01. Persisted tasks/current workflow state plus durable tables for a
 ## R03 — Pure workflow state machine and invariants — DONE
 Depends on R02. Deterministic persisted lifecycle states `READY`, `WORK`, `VALIDATE`, `REVIEW`, `REWORK`, `WAITING_PROVIDER`, `BLOCKED`, `FAILED`, `CANCELLED`, `DONE`; illegal transitions fail closed. `REVIEW`/`DONE`/`REWORK` enforce exact frozen candidate generation/SHA provenance, mandatory validation when configured, valid structured review output, and verdict policy. State writes use compare-and-set expectations inside the SQLite write transaction so stale supervisors cannot overwrite newer task/candidate state.
 
-## R04 — Attempt/artifact layout and immutable attempt records — READY
-Depends on R02. Per-task/per-attempt durable directories with immutable inputs, command/config snapshots, stdout/stderr, result metadata, timestamps and candidate SHA. Retries allocate new IDs and preserve history/secrets safety.
+## R04 — Attempt/artifact layout and immutable attempt records — DONE
+Depends on R02. SQLite allocates monotonically increasing per-kind attempt numbers under `BEGIN IMMEDIATE`; each attempt gets a non-reused `tasks/<task-id>/attempts/<kind>-NNN/` directory with immutable metadata/input/command/config snapshots, stdout/stderr paths and write-once result. Candidate generation/SHA is captured in metadata where applicable. Recursive credential redaction covers sensitive keys, CLI secret options, inline secrets and Bearer credentials. Attempt identity/history and artifact rows are protected from mutation/deletion by DB triggers; finalized results cannot be overwritten.
 
-## R05 — Managed Git workspace and candidate-generation primitives — FUTURE
+## R05 — Managed Git workspace and candidate-generation primitives — READY
 Depends on R01,R04. Safe dedicated writer/reviewer worktrees, baseline resolution, frozen candidate SHA and generation creation using real temporary Git repos. Never reset/clean unknown user worktrees.
 
 ## R06 — Subprocess supervisor foundation — FUTURE

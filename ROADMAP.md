@@ -21,10 +21,10 @@ Depends on R02. Deterministic persisted lifecycle states `READY`, `WORK`, `VALID
 ## R04 — Attempt/artifact layout and immutable attempt records — DONE
 Depends on R02. SQLite allocates monotonically increasing per-kind attempt numbers under `BEGIN IMMEDIATE`; each attempt gets a non-reused `tasks/<task-id>/attempts/<kind>-NNN/` directory with immutable metadata/input/command/config snapshots, stdout/stderr paths and write-once result. Candidate generation/SHA is captured in metadata where applicable. Recursive credential redaction covers sensitive keys, CLI secret options, inline secrets and Bearer credentials. Attempt identity/history and artifact rows are protected from mutation/deletion by DB triggers; finalized results cannot be overwritten.
 
-## R05 — Managed Git workspace and candidate-generation primitives — READY
-Depends on R01,R04. Safe dedicated writer/reviewer worktrees, baseline resolution, frozen candidate SHA and generation creation using real temporary Git repos. Never reset/clean unknown user worktrees.
+## R05 — Managed Git workspace and candidate-generation primitives — DONE
+Depends on R01,R04. Git operations use argv subprocesses without destructive reset/clean. Writer worktrees are dedicated branches rooted at a resolved frozen baseline; dirty/untracked files in the user's source checkout are preserved. Candidate detection requires a clean committed descendant of the frozen baseline. Candidate generation + current task pointer + `candidate_commit_detected` event are recorded atomically and idempotently. Every reviewer generation gets a distinct detached worktree checked out at the exact candidate SHA; existing managed paths fail closed instead of being overwritten. Tests use real temporary Git repositories/worktrees and exercise two candidate generations.
 
-## R06 — Subprocess supervisor foundation — FUTURE
+## R06 — Subprocess supervisor foundation — READY
 Depends on R04. Argv-only process launch/supervision, process groups, capture, timestamps, exit status, timeout hooks, sparse liveness and SIGTERM/SIGKILL cleanup tested with real subprocesses.
 
 ## R07 — Simulated writer provider — FUTURE

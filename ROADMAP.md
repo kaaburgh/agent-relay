@@ -27,10 +27,10 @@ Depends on R01,R04. Git operations use argv subprocesses without destructive res
 ## R06 — Subprocess supervisor foundation — DONE
 Depends on R04. Managed processes use argv-only `asyncio.create_subprocess_exec`, dedicated sessions/process groups, durable PID/PGID/timestamps/exit state and redacted command capture. Stdout/stderr are real files. Optional per-stage timeout sends SIGTERM then SIGKILL after grace; explicit termination targets the whole process group. Sparse heartbeat updates liveness metadata without semantic-event spam, no short global timeout is imposed, and launch-recording failure kills the newly started process group. Integration tests use real processes, including descendants and SIGTERM-ignore behavior.
 
-## R07 — Simulated writer provider — READY
-Depends on R05,R06. Declarative fake writer: sleep, modify/commit/no-commit, success/failure/hang/crash/malformed/provider-unavailable/partial-work/completion while supervisor absent. Use real temporary Git semantics where relevant.
+## R07 — Simulated writer provider — DONE
+Depends on R05,R06. A declarative real-process fake writer supports sleep, file modification, real Git commit, success with/without commit, declared failure, hang, crash, malformed result, provider unavailability/rate limit and partial work before crash. Provider normalization distinguishes malformed output, process failure and provider unavailability. Worker atomically writes an independent `provider-result.json`, so commit/result checkpoints can complete without a provider callback. Integration tests use real temporary Git/worktrees and include standalone worker completion outside the provider adapter.
 
-## R08 — Structured review contract and simulated reviewer — FUTURE
+## R08 — Structured review contract and simulated reviewer — READY
 Depends on R05,R06. Enforced verdict/severity schema, staged responses, fresh invocation IDs, malformed/failure/hang/unavailable behaviors. Malformed output can never approve.
 
 ## R09 — Generic external-tool model and simulated expensive validator — FUTURE

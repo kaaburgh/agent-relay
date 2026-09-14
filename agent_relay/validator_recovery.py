@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Any, Sequence
@@ -10,6 +9,7 @@ from typing import Literal, Mapping, Any, Sequence
 from .artifacts import ArtifactManager, AttemptLayout
 from .evidence import ValidationEvidence, record_validation
 from .resource_leases import ResourceLease, release_lease
+from .runtime_safety import process_ownership_is_live
 from .store import AttemptRow, Store, StoreError, utc_now
 
 
@@ -28,22 +28,6 @@ class ValidationRecoveryResult:
 _SUCCESS_STATES = {"completed", "complete", "success", "succeeded", "done", "passed"}
 _SUCCESS_CYCLE_STATUSES = {"ok", "success", "succeeded", "passed", "complete", "completed"}
 _CYCLE_ID_FIELDS = ("cycle", "cycle_id", "index")
-
-
-def _pid_is_live(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    stat = Path(f"/proc/{pid}/stat")
-    if stat.exists():
-        try:
-            return stat.read_text().split()[2] != "Z"
-        except (FileNotFoundError, IndexError):
-            return False
-    return True
 
 
 def _layout(artifact_root: Path, attempt: AttemptRow) -> AttemptLayout:
@@ -184,6 +168,27 @@ def _complete_evidence(
     return completed, rows, cycles_path, None
 
 
+def _exit_checkpoint(
+    path: Path,
+    *,
+    run_id: str,
+) -> tuple[int | None, str | None]:
+    if not path.exists():
+        return None, "process-exit.json is missing"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"process-exit.json is unreadable: {exc}"
+    if not isinstance(value, Mapping):
+        return None, "process-exit.json root must be an object"
+    if _string_field(value, "run_id", "runId") != run_id:
+        return None, "process-exit.json run_id mismatch"
+    exit_status = _integer_field(value, "exit_status", "exitStatus", "returncode")
+    if exit_status is None:
+        return None, "process-exit.json exit status is missing or invalid"
+    return exit_status, None
+
+
 def _register_if_missing(
     store: Store,
     *,
@@ -244,7 +249,11 @@ def reconcile_validation_attempt(
         "SELECT * FROM processes WHERE attempt_id=? ORDER BY process_id DESC LIMIT 1",
         (attempt_id,),
     ).fetchone()
-    if process is not None and process["state"] == "RUNNING" and _pid_is_live(int(process["pid"])):
+    if (
+        process is not None
+        and process["state"] == "RUNNING"
+        and process_ownership_is_live(store, process)
+    ):
         return ValidationRecoveryResult("RUNNING", attempt_id, None)
 
     evidence_dir = Path(evidence_dir)
@@ -267,11 +276,45 @@ def reconcile_validation_attempt(
         )
 
     artifact_root = Path(artifact_root)
+    current_layout = _layout(artifact_root, store.get_attempt(attempt_id))
+    checkpoint_path = current_layout.directory / "process-exit.json"
+    exit_status, checkpoint_error = _exit_checkpoint(checkpoint_path, run_id=run_id)
+    if checkpoint_error is not None:
+        return ValidationRecoveryResult(
+            "AMBIGUOUS",
+            attempt_id,
+            None,
+            "validator process is not live but successful process exit is unproven: "
+            + checkpoint_error,
+        )
+    if exit_status != 0:
+        return ValidationRecoveryResult(
+            "AMBIGUOUS",
+            attempt_id,
+            None,
+            f"validator terminal checkpoint proves nonzero exit {exit_status}; cannot recover success",
+        )
+
+    # A process already durably finalized as a failure cannot be rewritten into success merely
+    # because external evidence later looks complete (e.g. capture failure with exit zero).
+    if process is not None and process["state"] not in {"RUNNING", "SUCCEEDED"}:
+        return ValidationRecoveryResult(
+            "AMBIGUOUS",
+            attempt_id,
+            None,
+            f"durable process state is {process['state']!r}, not a successful recoverable state",
+        )
+    if process is not None and process["state"] == "SUCCEEDED" and process["exit_status"] not in {0, None}:
+        return ValidationRecoveryResult(
+            "AMBIGUOUS", attempt_id, None, "durable successful process has nonzero exit status"
+        )
+
     metadata = {"run_id": run_id, "generation": generation, "candidate_sha": candidate_sha}
     for kind, path in (
         ("runner_status", evidence_dir / "runner-status.json"),
         ("cycles", cycles_path),
         ("summary", evidence_dir / "summary.md"),
+        ("process_exit", checkpoint_path),
     ):
         _register_if_missing(
             store,
@@ -286,13 +329,18 @@ def reconcile_validation_attempt(
     if process is not None and process["state"] == "RUNNING":
         with store._transaction():
             store._conn.execute(
-                "UPDATE processes SET state='SUCCEEDED', ended_at=?, exit_status=0, last_liveness_at=? WHERE process_id=? AND state='RUNNING'",
+                """
+                UPDATE processes
+                SET state='SUCCEEDED', ended_at=?, exit_status=0, last_liveness_at=?
+                WHERE process_id=? AND state='RUNNING'
+                """,
                 (now, now, process["process_id"]),
             )
 
-    if attempt.status == "CREATED":
+    current_attempt = store.get_attempt(attempt_id)
+    if current_attempt.ended_at is None:
         ArtifactManager(artifact_root, store).finalize_attempt(
-            _layout(artifact_root, attempt),
+            _layout(artifact_root, current_attempt),
             status="SUCCESS",
             result={
                 "kind": "SUCCESS",
@@ -304,6 +352,13 @@ def reconcile_validation_attempt(
                 "recovered": True,
             },
             exit_status=0,
+        )
+    elif current_attempt.status != "SUCCESS":
+        return ValidationRecoveryResult(
+            "AMBIGUOUS",
+            attempt_id,
+            None,
+            f"validation attempt is already terminal as {current_attempt.status!r}",
         )
 
     validation = record_validation(

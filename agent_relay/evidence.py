@@ -35,6 +35,47 @@ class ReviewEvidence:
     created_at: str
 
 
+def ensure_evidence_history_guards(store: Store) -> None:
+    """Install DB-level append-only guards for deterministic validation/review history."""
+    with store._transaction():
+        store._conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS validations_are_append_only_update
+            BEFORE UPDATE ON validations
+            BEGIN
+                SELECT RAISE(ABORT, 'validations are append-only');
+            END
+            """
+        )
+        store._conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS validations_are_append_only_delete
+            BEFORE DELETE ON validations
+            BEGIN
+                SELECT RAISE(ABORT, 'validations are append-only');
+            END
+            """
+        )
+        store._conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS reviews_are_append_only_update
+            BEFORE UPDATE ON reviews
+            BEGIN
+                SELECT RAISE(ABORT, 'reviews are append-only');
+            END
+            """
+        )
+        store._conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS reviews_are_append_only_delete
+            BEFORE DELETE ON reviews
+            BEGIN
+                SELECT RAISE(ABORT, 'reviews are append-only');
+            END
+            """
+        )
+
+
 def _assert_candidate(store: Store, task_id: str, generation: int, candidate_sha: str) -> None:
     row = store._conn.execute(
         "SELECT candidate_sha FROM candidate_generations WHERE task_id=? AND generation=?",
@@ -66,6 +107,7 @@ def record_validation(
     status: str,
     result: Mapping[str, Any],
 ) -> ValidationEvidence:
+    ensure_evidence_history_guards(store)
     now = utc_now()
     with store._transaction():
         _assert_candidate(store, task_id, generation, candidate_sha)
@@ -100,6 +142,7 @@ def record_review(
     review: StructuredReview,
     raw_result_path: str,
 ) -> ReviewEvidence:
+    ensure_evidence_history_guards(store)
     now = utc_now()
     payload = review.to_dict()
     findings = tuple(payload["findings"])

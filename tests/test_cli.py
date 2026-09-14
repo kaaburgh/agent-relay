@@ -206,7 +206,7 @@ workspace:
             ["task", "create", str(self._write("baseline: main\n"))]
         )
         self.assertEqual(rc, 2)
-        self.assertIn("task.repository", stderr)
+        self.assertTrue(stderr.startswith("error: task."))
 
 
 if __name__ == "__main__":

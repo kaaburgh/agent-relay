@@ -2,29 +2,27 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`.
+Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`.
 
-Next bounded unit: `R14 — Writer restart recovery`.
+Next bounded unit: `R15 — External-validation restart recovery`.
 
-## R01–R12 summary
+## R01–R13 summary
 
-Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated writer/reviewer/validator workers, happy-path and rework orchestration, and durable provider wait/retry are implemented with real temporary Git/SQLite/subprocess semantics.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated writer/reviewer/validator workers, happy-path and rework orchestration, durable provider retry, and generic persisted resource leases are implemented using real temporary Git/SQLite/subprocess semantics.
 
-## R13 evidence
+## R14 evidence
 
-Implemented `agent_relay/resource_leases.py` and `tests/test_resource_leases.py`.
+Implemented `agent_relay/writer_recovery.py` and `tests/test_writer_recovery.py`.
 
-Resource lease guarantees:
+Writer recovery guarantees:
 
-- named resources have explicit positive capacity stored in SQLite;
-- acquisition runs under `BEGIN IMMEDIATE`, so capacity read/check/insert is one serialized transaction;
-- capacity 1 rejects a second holder until release; capacity 2 permits exactly two active holders;
-- separate resource names can be held concurrently, so unrelated workflow stages are not globally serialized;
-- holder IDs are durable single-use lease identities and an active same-owner acquire is idempotent;
-- release verifies ownership and emits `resource_released`; acquire emits `resource_acquired`; heartbeat updates only liveness and creates no semantic-event spam;
-- an active lease survives database close/reopen and still consumes capacity;
-- stale recovery only considers attempt-bound leases whose heartbeat is stale and for which there is no durable `RUNNING` process row;
-- safe recovery is tested with a real sleeping subprocess: an artificially stale lease is not reclaimed while its process is running, then is reclaimed after the real process is terminated.
+- a real separately running simulated writer process may outlive the first orchestrator/SQLite `Store` instance;
+- while the recorded PID is still live and no durable result exists, reconciliation returns `RUNNING` and never launches a duplicate writer;
+- after the first Store is closed, the worker independently modifies the real managed worktree, commits the candidate, writes `provider-result.json`, and exits;
+- a newly opened Store reconciles provider result + real Git HEAD + durable process/attempt evidence into the original writer attempt and candidate generation;
+- recovery finalizes the original attempt, repairs the stale durable process row to `SUCCEEDED`, records the exact candidate SHA/generation, and emits `writer_recovered`;
+- repeated reconciliation is idempotent: it returns `ALREADY_RECOVERED` without adding attempts, candidate generations, semantic events, or a second expensive worker launch;
+- missing result plus no live recorded process is treated as ambiguous ownership and fails closed rather than guessing that a relaunch is safe.
 
 Acceptance command:
 
@@ -32,11 +30,11 @@ Acceptance command:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions on `ff6886fc2f89cc0150cf342ffbb21e204edbe81d`: PASS on Python 3.12.
+GitHub Actions on `535caec5292128739084270f6c9e86161fa4f4e4`: PASS on Python 3.12.
 
 ## Current product state
 
-Core simulation now has explicit persisted concurrency control suitable for expensive validators/runtimes, in addition to provider retry and multi-generation review/rework. Next is restart recovery for the writer: durable commit/result/process evidence must allow a new orchestrator instance to advance without launching duplicate expensive writer work.
+The writer side now has a real restart boundary: durable filesystem/Git/SQLite evidence is sufficient to recover a completed worker without duplicate launch. The next gap is the analogous expensive-validator recovery path, including persisted resource-lease ownership and fail-closed behavior for ambiguous/incomplete evidence.
 
 ## Durable decisions
 
@@ -48,7 +46,7 @@ Core simulation now has explicit persisted concurrency control suitable for expe
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
 - Provider retry timing is explicit durable data; no busy-spin or implicit retry loop.
 - Resource serialization is named/capacity-based and persisted rather than a global in-memory mutex.
-- Stale lease recovery fails safe when durable process evidence still says RUNNING.
+- Restart recovery reconciles durable evidence before considering any expensive relaunch.
 - Bloodborne-specific behavior stays outside orchestration core.
 
 ## Handoff protocol

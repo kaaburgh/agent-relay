@@ -8,33 +8,25 @@ In progress: `R26`.
 
 Next bounded unit: `R26` — Final correctness/security review and required demonstration.
 
-Acceptance pending: close the confirmed JSON validation-recovery gap, then add `docs/final-review.md` plus CI acceptance for its documented boundaries/connection steps and run the final R26 demonstration on one production HEAD before marking the project complete.
+Acceptance pending: production audit is frozen after the final confirmed recovery fix; add `docs/final-review.md` plus CI acceptance for its documented boundaries/connection steps, then run the final R26-specific/full/required-scenario/seeded-chaos demonstration on one production HEAD before marking the project complete.
 
-## Latest R26 durable fact — JSON validation recovery gap CONFIRMED RED
+## Latest R26 durable fact — JSON validation recovery gap CLOSED GREEN
 
-Adversarial test commit `dc068c89a4424a1b73614426680b570e45afb766` added `R26ValidatorRecoveryJsonTests.test_completed_json_validation_evidence_recovers_without_rerun`.
+Production HEAD `3a79fe1571a1522afffd88a2ac2b9de58a6d32a2`, GitHub Actions run `34858291629`: PASS, 167 tests in 53.786s.
 
-GitHub Actions run `34858018738`: FAILED, 167 tests in 45.746s with exactly one failure, the new JSON recovery test. The durable validation attempt had a matching completed `runner-status.json`, exactly three ordered successful records in the real adapter's supported `cycles.json` format, `summary.md`, an active capacity-one lease and no live process. `reconcile_validation_attempt()` returned `AMBIGUOUS` instead of `RECOVERED` because recovery only looked for `cycles.csv`.
+`R26ValidatorRecoveryJsonTests.test_completed_json_validation_evidence_recovers_without_rerun` is green. Durable validator recovery now reads either `cycles.csv` or `cycles.json`, accepts the same canonical success-state/status aliases used by the real shadPS4 boundary, verifies exact requested/completed counts and ordered cycle identifiers when present, requires explicit per-cycle success proof, registers the actual cycle-evidence path, reuses the existing attempt and releases the held runtime lease. Incomplete or malformed evidence remains `AMBIGUOUS` and retains its lease.
 
-This is a restart-recovery defect: the real shadPS4 adapter accepts both `cycles.csv` and `cycles.json`, but the durable recovery path could not recover the JSON success form. A successful expensive run could therefore remain ambiguous and retain its lease rather than being reused without rerun.
+Red evidence remains GitHub Actions run `34858018738` on `dc068c89a4424a1b73614426680b570e45afb766`: 167 tests in 45.746s with exactly one failure, where a complete successful `cycles.json` run returned `AMBIGUOUS` instead of `RECOVERED`.
 
-Exact next repair:
-
-1. Extend validator recovery to read the same supported CSV/JSON cycle evidence boundary, without inventing evidence or launching a new attempt.
-2. Return/register the actual cycle-evidence path (`cycles.csv` or `cycles.json`) used for recovery.
-3. Preserve fail-closed behavior for malformed/incomplete evidence and keep the existing CSV recovery tests unchanged.
-4. Make `R26ValidatorRecoveryJsonTests.test_completed_json_validation_evidence_recovers_without_rerun` green, run existing validator recovery tests and the full suite, then checkpoint the green result before documentation work.
-5. After green, freeze production audit scope unless the fix itself exposes a new material regression; proceed to final review documentation and final demonstration.
+The green run also passed existing CSV validator recovery tests, all shadPS4 adapter tests, all twelve deterministic integration scenarios and the seeded 100-workflow chaos sweep.
 
 ## Previous R26 durable fact — per-cycle success evidence fail-open CLOSED GREEN
 
 Production HEAD `5ab31b3469f5c4d427c427ff3ef8fd2bb9a00faa`, GitHub Actions run `34857598533`: PASS, 166 tests in 44.196s.
 
-`ShadPS4BloodborneValidator._cycle_failure()` now requires every cycle record to contain a non-empty `status`, `result`, or `outcome`. Missing per-cycle success proof is `INCOMPLETE_EVIDENCE`; explicit known failure statuses remain `VALIDATION_FAILED`.
+`ShadPS4BloodborneValidator._cycle_failure()` requires every cycle record to contain a non-empty `status`, `result`, or `outcome`. Missing per-cycle success proof is `INCOMPLETE_EVIDENCE`; explicit known failure statuses remain `VALIDATION_FAILED`.
 
-Red evidence: GitHub Actions run `34857262874` on `5352fa306e557fd9b5a847665c7314c5160750a6` — 166 tests with exactly one failure where matching completed N/N evidence without per-cycle status was incorrectly accepted as `SUCCESS`.
-
-## R26 findings already closed
+## R26 findings closed by the adversarial audit
 
 - unbounded subprocess logs — bounded tail capture with continuous drain;
 - external cancellation vs in-memory process finalization — durable terminal-state reconciliation;
@@ -45,7 +37,18 @@ Red evidence: GitHub Actions run `34857262874` on `5352fa306e557fd9b5a847665c731
 - cancellation vs provider result publication — red `34846974177`, green `34847495507` after compatibility preservation;
 - result-file/SQLite crash residue — red `34847845590`, green `34848116328`;
 - missing per-cycle success evidence — red `34857262874`, green `34857598533`;
+- CSV/JSON validation recovery mismatch — red `34858018738`, green `34858291629`;
 - unsafe local shell/destructive Git cleanup — no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
+
+## Audit conclusion and remaining R26 scope
+
+The bounded production-code adversarial audit is now frozen. No additional material production finding remains open from the required R26 categories. The remaining work is acceptance/documentation only:
+
+1. add `docs/final-review.md` with findings/dispositions, architecture/state/schema/provider/recovery summary, known limitations and exact safe Codex/Claude/local-or-SSH shadPS4 connection steps;
+2. explicitly state that real adapters are individually implemented/tested while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than providing an integrated real-provider composition;
+3. add CI acceptance for those documented boundaries and required demonstration mapping;
+4. run one final R26 production/documentation HEAD through the R26-specific tests, full suite, all twelve deterministic scenarios and seeded >=100 chaos workflows;
+5. if green, atomically mark `R26` DONE and synchronize `ROADMAP.md` / this handoff, then verify final metadata CI.
 
 ## Development protocol guard
 

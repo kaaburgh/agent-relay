@@ -6,7 +6,7 @@ Completed: `R00`–`R22`.
 
 In progress: `R23`.
 
-Next bounded unit: `R23 — Real shadPS4/Bloodborne tool adapter`.
+Next bounded unit: `R23` — Real shadPS4/Bloodborne tool adapter.
 
 Acceptance pending: dedicated R23 acceptance coverage for the external shadPS4/Bloodborne adapter. The production adapter is present at HEAD, and the full pre-existing regression suite is green, but R23 is **not** complete until its own success/failure/evidence cases are directly exercised.
 

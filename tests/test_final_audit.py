@@ -93,6 +93,33 @@ class FinalAuditProcessTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_cancelled_attempt_rejects_late_provider_result_without_history_pollution(self) -> None:
+        layout = self.artifacts.create_attempt(task_id="task-1", kind="writer")
+        cancelled = self.store.finish_attempt(
+            attempt_id=layout.attempt.attempt_id,
+            status="CANCELLED",
+            result={"reason": "operator cancellation"},
+            exit_status=None,
+        )
+        before = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=?",
+            (layout.attempt.attempt_id,),
+        ).fetchone()[0]
+        returned = self.artifacts.finalize_attempt(
+            layout,
+            status="PROCESS_FAILURE",
+            result={"reason": "late provider finish"},
+            exit_status=-15,
+        )
+        after = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=?",
+            (layout.attempt.attempt_id,),
+        ).fetchone()[0]
+        self.assertEqual(returned.status, "CANCELLED")
+        self.assertEqual(returned.result, cancelled.result)
+        self.assertFalse(layout.result_path.exists())
+        self.assertEqual(after, before)
+
     def test_production_source_avoids_local_shell_and_destructive_git_cleanup(self) -> None:
         package_root = Path(__file__).resolve().parents[1] / "agent_relay"
         source = "\n".join(path.read_text(encoding="utf-8") for path in package_root.glob("*.py"))

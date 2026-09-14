@@ -2,30 +2,26 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`, `R15`, `R16`.
+Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`, `R15`, `R16`, `R17`.
 
-Next bounded unit: `R17 — Review/error guardrails and correction limit`.
+Next bounded unit: `R18 — Complete deterministic integration suite`.
 
-## R01–R15 summary
+## R01–R16 summary
 
-Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated providers/tools, happy-path and multi-generation rework orchestration, provider retry, persisted resource leases, and restart recovery for writer/expensive validation are implemented with real temporary Git/SQLite/subprocess semantics.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision/watchdog cleanup, simulated providers/tools, happy-path and multi-generation rework orchestration, provider retry, persisted resource leases, and restart recovery for writer/expensive validation are implemented with real temporary Git/SQLite/subprocess semantics.
 
-## R16 evidence
+## R17 evidence
 
-Implemented `agent_relay/watchdog.py`, extended `agent_relay/supervisor.py` and integrated progress supervision into `agent_relay/simulated_validator.py`; added `tests/test_watchdog.py`.
+Implemented `agent_relay/guardrails.py`, extended `agent_relay/orchestrator.py`, and added `tests/test_guardrails.py`.
 
-Watchdog/cleanup guarantees:
+Guardrail guarantees:
 
-- process outcomes remain distinct: wall-clock timeout is `TIMED_OUT`, evidence-progress stall is `STALLED`, process crash/nonzero remains `FAILED`, and explicit cancellation is `CANCELLED`;
-- stage timeout is an absolute monotonic deadline anchored at actual subprocess launch, so adding a progress watchdog cannot postpone or bypass it;
-- stall detection ignores liveness heartbeats and watches only changes to configured evidence files, allowing a live-but-logically-stuck process to be detected;
-- a run lasting longer than the stall window succeeds when it continues to update progress evidence;
-- stalled validator tests preserve the partial `runner-status.json` and `cycles.csv` evidence showing the last completed/current cycle;
-- stall and timeout cleanup target the whole process group, including descendants, with SIGTERM followed by SIGKILL when required;
-- watchdog polling creates no semantic-event chatter;
-- provider-unavailable remains a separate provider-adapter classification and is covered by the existing writer/reviewer regression suite.
-
-The first R16 acceptance run intentionally failed because progress polling waited on the low-level subprocess and bypassed the supervisor timeout path. The fix moved timeout semantics to an absolute managed-process deadline and made the watchdog honor it. This regression is now covered explicitly.
+- malformed reviewer output from an otherwise successful process is never persisted as approval; orchestration emits `review_invalid_output` and transitions durably from `REVIEW` to `BLOCKED`;
+- exit-zero validation with incomplete deterministic evidence is persisted as `INCOMPLETE_EVIDENCE`, emits `validation_incomplete_evidence`, blocks before review starts, and can never satisfy a review/DONE gate;
+- review policy consumes only persisted review/validation evidence for the exact current generation/SHA;
+- `max_correction_rounds` is interpreted as the number of allowed `REWORK` rounds: with limit 2, the first two `REQUEST_CHANGES` verdicts create fresh generations while the third is preserved as review evidence and transitions to `BLOCKED` with `correction_limit_reached`;
+- blocking at the correction limit does not launch another writer or create another candidate generation;
+- a real three-generation sequence proves two correction rounds followed by a fresh approval and `DONE`, with distinct reviewer attempts/run IDs, exact-generation validation, findings copied into the next writer inputs, and immutable historical review rows.
 
 Acceptance command:
 
@@ -33,11 +29,11 @@ Acceptance command:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions on `86d2bddad554c512852f9727366d33acf316dab5`: PASS on Python 3.12. The preceding run `5e7c96bb9961cada8f44f7947bc3eb8807b61c52` failed exactly on timeout-vs-stall classification and was not accepted as a checkpoint.
+GitHub Actions on `82f9e8880e929b52b64f4230b4eab4f22a27af84`: PASS, 93 tests in 27.135s on Python 3.12.14.
 
 ## Current product state
 
-The simulation/recovery core can now tell a genuinely stalled expensive run from a merely long-running one, while preserving independent wall-clock timeout and process-group cleanup semantics. Next is the final pre-suite guardrail layer: malformed review/incomplete validation must fail closed, repeated correction history must remain intact, and exceeding `max_correction_rounds` must transition durably to `BLOCKED` rather than loop indefinitely.
+All primitives needed by the twelve required deterministic scenarios now exist. The next unit makes that contract explicit as a named integration-scenario suite rather than relying on coverage being distributed implicitly across lower-level tests. Any scenario-specific gap found while assembling that matrix must be implemented before R18 is marked complete.
 
 ## Durable decisions
 
@@ -48,6 +44,8 @@ The simulation/recovery core can now tell a genuinely stalled expensive run from
 - Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
 - Wall-clock timeout and evidence-progress stall are separate policies; liveness heartbeat is not proof of useful progress.
+- Malformed reviewer output and incomplete deterministic validation evidence block rather than fail open.
+- Correction rounds are bounded by task configuration and every rejected generation remains auditable.
 - Resource serialization is named/capacity-based and persisted rather than a global in-memory mutex.
 - Restart recovery reconciles durable result/process/filesystem evidence before any expensive relaunch.
 - Ambiguous expensive-validator ownership retains its lease instead of failing open.

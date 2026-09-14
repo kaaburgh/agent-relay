@@ -54,10 +54,10 @@ Depends on R07,R10. A separately running real fake writer survives closure of th
 ## R15 — External-validation restart recovery — DONE
 Depends on R09,R13. A separately running real fake validator can survive Store closure while retaining a persisted resource lease. Reconciliation requires complete run-ID/N-of-N machine evidence before finalizing the original attempt, recording validation and releasing the lease. Live ownership prevents duplicate launch. Dead process with incomplete evidence returns `AMBIGUOUS`, creates no validation record and intentionally retains the lease so an expensive runtime cannot overlap under uncertain ownership.
 
-## R16 — Cancellation, timeout, stall watchdog, cleanup — READY
-Depends on R06,R09. Distinguish timeout/stall/crash/provider-unavailable/legitimate long run; preserve evidence; SIGTERM then forced SIGKILL; no event spam.
+## R16 — Cancellation, timeout, stall watchdog, cleanup — DONE
+Depends on R06,R09. Managed processes now distinguish `TIMED_OUT`, `STALLED`, `FAILED` and `CANCELLED` while preserving whole-process-group SIGTERM/SIGKILL cleanup. Stall detection watches low-cost evidence-file progress rather than liveness heartbeats, preserves partial evidence, emits no polling events, and allows long runs that continue to make progress. Stage timeout is an absolute deadline from process launch and remains authoritative while the progress watchdog is active. Provider-unavailable classification remains separate in provider adapters.
 
-## R17 — Review/error guardrails and correction limit — FUTURE
+## R17 — Review/error guardrails and correction limit — READY
 Depends on R11,R12,R16. Required scenarios for malformed review, incomplete validation evidence, repeated correction history and max-round BLOCKED behavior.
 
 ## R18 — Complete deterministic integration suite — FUTURE

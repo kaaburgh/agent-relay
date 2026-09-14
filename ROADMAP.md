@@ -57,10 +57,10 @@ Depends on R09,R13. A separately running real fake validator can survive Store c
 ## R16 — Cancellation, timeout, stall watchdog, cleanup — DONE
 Depends on R06,R09. Managed processes now distinguish `TIMED_OUT`, `STALLED`, `FAILED` and `CANCELLED` while preserving whole-process-group SIGTERM/SIGKILL cleanup. Stall detection watches low-cost evidence-file progress rather than liveness heartbeats, preserves partial evidence, emits no polling events, and allows long runs that continue to make progress. Stage timeout is an absolute deadline from process launch and remains authoritative while the progress watchdog is active. Provider-unavailable classification remains separate in provider adapters.
 
-## R17 — Review/error guardrails and correction limit — READY
-Depends on R11,R12,R16. Required scenarios for malformed review, incomplete validation evidence, repeated correction history and max-round BLOCKED behavior.
+## R17 — Review/error guardrails and correction limit — DONE
+Depends on R11,R12,R16. Invalid reviewer output and exit-zero incomplete validation evidence now fail closed into durable `BLOCKED` states with explicit semantic events. A generic review guardrail consumes persisted exact-candidate review/validation evidence, permits only configured rework rounds, emits `correction_limit_reached` when the next request exceeds `max_correction_rounds`, and never creates another generation after blocking. A real multi-round orchestration path proves two `REQUEST_CHANGES` generations followed by fresh approval while preserving distinct attempts/run IDs, feedback inputs, validations and immutable review history.
 
-## R18 — Complete deterministic integration suite — FUTURE
+## R18 — Complete deterministic integration suite — READY
 Depends on R14,R15,R17. All 12 scenarios in `docs/spec.md` run as real integration tests using temporary Git/SQLite/subprocesses and remain reasonably fast.
 
 ## R19 — Chaos/stress and invariant sweeps — FUTURE

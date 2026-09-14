@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from .artifacts import ArtifactManager
 from .evidence import ReviewEvidence, ValidationEvidence, record_review, record_validation
 from .git_workspace import CandidateGeneration, GitWorkspaceManager, record_candidate_generation
+from .guardrails import GuardrailAction, GuardrailDecision, apply_review_guardrail
 from .simulated_reviewer import ReviewerResultKind, SimulatedReviewerProvider
 from .simulated_validator import SimulatedValidator, ValidationResultKind
 from .simulated_writer import SimulatedWriterProvider, WriterResultKind
@@ -36,6 +37,15 @@ class ReworkResult:
     final_candidate: CandidateGeneration
     final_validation: ValidationEvidence
     final_review: ReviewEvidence
+
+
+@dataclass(frozen=True)
+class CorrectionSequenceResult:
+    task: TaskRow
+    candidates: tuple[CandidateGeneration, ...]
+    validations: tuple[ValidationEvidence, ...]
+    reviews: tuple[ReviewEvidence, ...]
+    decisions: tuple[GuardrailDecision, ...]
 
 
 class SimulationOrchestrator:
@@ -89,6 +99,22 @@ class SimulationOrchestrator:
                 "reason": validation_result.reason,
             },
         )
+        if validation_result.kind == ValidationResultKind.INCOMPLETE_EVIDENCE:
+            self.workflow.transition(
+                task_id,
+                WorkflowStage.BLOCKED,
+                event_type="validation_incomplete_evidence",
+                payload={
+                    "attempt_id": validation_result.attempt_id,
+                    "run_id": validation_result.run_id,
+                    "generation": candidate.generation,
+                    "candidate_sha": candidate.candidate_sha,
+                    "reason": validation_result.reason,
+                },
+            )
+            raise OrchestrationError(
+                f"validation incomplete evidence: {validation_result.reason}"
+            )
         if validation_result.kind != ValidationResultKind.SUCCESS:
             raise OrchestrationError(
                 f"validation did not pass: {validation_result.kind}: {validation_result.reason}"
@@ -116,6 +142,22 @@ class SimulationOrchestrator:
             candidate_sha=candidate.candidate_sha,
             behavior=behavior,
         )
+        if reviewer_result.kind == ReviewerResultKind.MALFORMED:
+            self.workflow.transition(
+                task_id,
+                WorkflowStage.BLOCKED,
+                event_type="review_invalid_output",
+                payload={
+                    "attempt_id": reviewer_result.attempt_id,
+                    "invocation_id": reviewer_result.invocation_id,
+                    "generation": candidate.generation,
+                    "candidate_sha": candidate.candidate_sha,
+                    "reason": reviewer_result.reason,
+                },
+            )
+            raise OrchestrationError(
+                f"review output is malformed and task was blocked: {reviewer_result.reason}"
+            )
         if reviewer_result.kind != ReviewerResultKind.SUCCESS or reviewer_result.review is None:
             raise OrchestrationError(
                 f"review did not produce valid structured output: {reviewer_result.kind}: {reviewer_result.reason}"
@@ -332,4 +374,105 @@ class SimulationOrchestrator:
             final_candidate=final_candidate,
             final_validation=final_validation,
             final_review=final_review,
+        )
+
+    async def run_correction_sequence(
+        self,
+        task_id: str,
+        *,
+        writer_behaviors: Sequence[Sequence[Mapping[str, Any]]],
+        reviewer_behaviors: Sequence[Sequence[Mapping[str, Any]]],
+        validation_cycles: int = 2,
+    ) -> CorrectionSequenceResult:
+        if not writer_behaviors or not reviewer_behaviors:
+            raise OrchestrationError("correction sequence requires writer and reviewer behaviors")
+        if len(writer_behaviors) < len(reviewer_behaviors):
+            raise OrchestrationError("each configured review generation requires a writer behavior")
+
+        task = self.store.get_task(task_id)
+        if task.stage != WorkflowStage.READY.value:
+            raise OrchestrationError(f"correction sequence requires READY task, found {task.stage}")
+        self.workflow.transition(task_id, WorkflowStage.WORK)
+        workspaces = self.git.create_writer_worktree(
+            task_id=task_id, repository=task.repository, baseline_ref=task.baseline_ref
+        )
+
+        candidates: list[CandidateGeneration] = []
+        validations: list[ValidationEvidence] = []
+        reviews: list[ReviewEvidence] = []
+        decisions: list[GuardrailDecision] = []
+        previous_candidate: CandidateGeneration | None = None
+        previous_review: ReviewEvidence | None = None
+
+        for index, reviewer_behavior in enumerate(reviewer_behaviors):
+            if index > 0 and self.store.get_task(task_id).stage != WorkflowStage.REWORK.value:
+                raise OrchestrationError("next correction generation requires REWORK stage")
+            writer_result = await self.writer.run(
+                task_id=task_id,
+                writer_worktree=workspaces.writer,
+                baseline_sha=(
+                    workspaces.baseline_sha if previous_candidate is None else previous_candidate.candidate_sha
+                ),
+                behavior=writer_behaviors[index],
+                generation=None if previous_candidate is None else previous_candidate.generation,
+                feedback=() if previous_review is None else previous_review.findings,
+            )
+            if writer_result.kind != WriterResultKind.SUCCESS or not writer_result.candidate_sha:
+                raise OrchestrationError(f"writer generation {index + 1} did not produce a candidate")
+            candidate = record_candidate_generation(
+                self.store,
+                task_id=task_id,
+                candidate_sha=writer_result.candidate_sha,
+                writer_attempt_id=writer_result.attempt_id,
+                expected_previous_generation=0 if previous_candidate is None else previous_candidate.generation,
+            )
+            candidates.append(candidate)
+
+            self.workflow.transition(task_id, WorkflowStage.VALIDATE)
+            validation = await self._validate(
+                task_id=task_id,
+                cwd=workspaces.writer,
+                candidate=candidate,
+                validation_cycles=validation_cycles,
+                validation_behavior=None,
+            )
+            validations.append(validation)
+            self.workflow.transition(
+                task_id, WorkflowStage.REVIEW, facts=self._validation_facts(candidate)
+            )
+            review, _ = await self._review(
+                task_id=task_id,
+                repository=task.repository,
+                candidate=candidate,
+                behavior=reviewer_behavior,
+            )
+            reviews.append(review)
+            decision = apply_review_guardrail(
+                self.store,
+                self.workflow,
+                task_id=task_id,
+                review=review,
+            )
+            decisions.append(decision)
+            previous_candidate = candidate
+            previous_review = review
+
+            if decision.action in {GuardrailAction.DONE, GuardrailAction.BLOCKED}:
+                return CorrectionSequenceResult(
+                    task=decision.task,
+                    candidates=tuple(candidates),
+                    validations=tuple(validations),
+                    reviews=tuple(reviews),
+                    decisions=tuple(decisions),
+                )
+
+        current = self.store.get_task(task_id)
+        if current.stage == WorkflowStage.REWORK.value:
+            raise OrchestrationError("correction sequence exhausted behaviors while task still requires rework")
+        return CorrectionSequenceResult(
+            task=current,
+            candidates=tuple(candidates),
+            validations=tuple(validations),
+            reviews=tuple(reviews),
+            decisions=tuple(decisions),
         )

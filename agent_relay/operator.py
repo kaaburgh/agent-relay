@@ -18,6 +18,7 @@ import yaml
 from .config import load_global_config
 from .evidence import latest_review, latest_validation
 from .models import ConfigError, GlobalConfig, ProviderConfig, TaskSpec
+from .operator_ownership import process_ownership_state
 from .provider_retry import get_provider_wait, resume_provider_if_due
 from .resource_leases import active_leases, configure_resource
 from .store import Store, StoreError, TaskNotFound, TaskRow, utc_now
@@ -140,23 +141,6 @@ def create_task(context: RuntimeContext, task: TaskSpec) -> TaskRow:
     return row
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    stat = Path(f"/proc/{pid}/stat")
-    if stat.exists():
-        try:
-            if stat.read_text(encoding="utf-8").split()[2] == "Z":
-                return False
-        except (OSError, IndexError):
-            pass
-    return True
-
-
 def task_status(store: Store, task_id: str) -> dict[str, Any]:
     task = store.get_task(task_id)
     process_rows = store._conn.execute(
@@ -167,20 +151,24 @@ def task_status(store: Store, task_id: str) -> dict[str, Any]:
         """,
         (task_id,),
     ).fetchall()
-    active_processes = [
-        {
-            "process_id": int(row["process_id"]),
-            "attempt_id": row["attempt_id"],
-            "pid": int(row["pid"]),
-            "process_group_id": row["process_group_id"],
-            "state": row["state"],
-            "pid_alive": _pid_alive(int(row["pid"])) if row["state"] == "RUNNING" else False,
-            "started_at": row["started_at"],
-            "last_liveness_at": row["last_liveness_at"],
-        }
-        for row in process_rows
-        if row["state"] == "RUNNING"
-    ]
+    active_processes: list[dict[str, Any]] = []
+    for row in process_rows:
+        if row["state"] != "RUNNING":
+            continue
+        ownership = process_ownership_state(store, row)
+        active_processes.append(
+            {
+                "process_id": int(row["process_id"]),
+                "attempt_id": row["attempt_id"],
+                "pid": int(row["pid"]),
+                "process_group_id": row["process_group_id"],
+                "state": row["state"],
+                "pid_alive": ownership == "LIVE",
+                "ownership": ownership,
+                "started_at": row["started_at"],
+                "last_liveness_at": row["last_liveness_at"],
+            }
+        )
     events = store.events(task_id)
     last_event = events[-1] if events else None
     wait = get_provider_wait(store, task_id)
@@ -337,10 +325,31 @@ def _process_group_alive(group: int) -> bool:
     return not observed_member
 
 
-def _terminate_process_group(pid: int, pgid: int | None, grace_seconds: float) -> tuple[bool, bool]:
-    group = int(pgid or pid)
+def _terminate_owned_process_group(
+    store: Store,
+    row: Any,
+    grace_seconds: float,
+) -> tuple[bool, bool]:
+    ownership = process_ownership_state(store, row)
+    if ownership == "DEAD":
+        return False, False
+    if ownership != "LIVE":
+        raise OperatorError(
+            f"refusing to signal process {row['process_id']}: durable ownership is {ownership}"
+        )
+
+    group = int(row["process_group_id"] or row["pid"])
     if not _process_group_alive(group):
         return False, False
+    # Re-check immediately before the destructive signal to close the PID-reuse TOCTOU gap.
+    ownership = process_ownership_state(store, row)
+    if ownership == "DEAD":
+        return False, False
+    if ownership != "LIVE":
+        raise OperatorError(
+            f"refusing to signal process {row['process_id']}: ownership changed to {ownership}"
+        )
+
     sent_term = False
     sent_kill = False
     try:
@@ -354,11 +363,17 @@ def _terminate_process_group(pid: int, pgid: int | None, grace_seconds: float) -
             return sent_term, sent_kill
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
     if _process_group_alive(group):
-        try:
-            os.killpg(group, signal.SIGKILL)
-            sent_kill = True
-        except ProcessLookupError:
-            pass
+        ownership = process_ownership_state(store, row)
+        if ownership == "LIVE":
+            try:
+                os.killpg(group, signal.SIGKILL)
+                sent_kill = True
+            except ProcessLookupError:
+                pass
+        elif ownership != "DEAD":
+            raise OperatorError(
+                f"refusing SIGKILL for process {row['process_id']}: ownership changed to {ownership}"
+            )
     return sent_term, sent_kill
 
 
@@ -373,11 +388,19 @@ def cancel_task(store: Store, task_id: str, *, grace_seconds: float = 5.0) -> di
         "SELECT * FROM processes WHERE task_id=? AND state='RUNNING' ORDER BY process_id",
         (task_id,),
     ).fetchall()
+
+    # Fail before sending any signal if a numeric PID/PGID now belongs to another process or
+    # if this is a legacy row for which durable identity was never captured.
+    for row in rows:
+        ownership = process_ownership_state(store, row)
+        if ownership in {"MISMATCH", "UNVERIFIED"}:
+            raise OperatorError(
+                f"cannot safely cancel process {row['process_id']}: ownership is {ownership}"
+            )
+
     terminated: list[dict[str, Any]] = []
     for row in rows:
-        sent_term, sent_kill = _terminate_process_group(
-            int(row["pid"]), row["process_group_id"], grace_seconds
-        )
+        sent_term, sent_kill = _terminate_owned_process_group(store, row, grace_seconds)
         now = utc_now()
         with store._transaction():
             store._conn.execute(

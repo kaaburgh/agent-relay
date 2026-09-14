@@ -196,24 +196,87 @@ class ArtifactManager:
         if not status.strip():
             raise ArtifactError("attempt status must not be empty")
 
-        # Operator cancellation is an independently durable terminal decision. A provider
-        # callback that races in afterwards must not create a new result artifact or replace
-        # the cancellation history with its own normalized outcome.
+        # Cheap fast-path for cancellation already known before finalization enters. This is
+        # deliberately repeated under the write transaction below: operator cancellation may
+        # commit after this read but before result publication begins.
         current = self.store.get_attempt(layout.attempt.attempt_id)
-        if current.ended_at is not None and current.status == "CANCELLED":
-            return current
+        if current.ended_at is not None:
+            if current.status == "CANCELLED":
+                return current
+            raise StoreError(f"attempt {current.attempt_id} is already finalized")
 
         safe_result = redact(result)
-        _write_json_exclusive(layout.result_path, safe_result)
-        self.store.register_artifact(
-            task_id=layout.attempt.task_id,
-            attempt_id=layout.attempt.attempt_id,
-            kind="result",
-            path=str(layout.result_path.relative_to(self.root)),
-        )
-        return self.store.finish_attempt(
-            attempt_id=layout.attempt.attempt_id,
-            status=status,
-            result=safe_result,
-            exit_status=exit_status,
-        )
+        result_relative = str(layout.result_path.relative_to(self.root))
+        result_json = json.dumps(safe_result, sort_keys=True, separators=(",", ":"))
+        created_result_file = False
+        finalized_row = None
+        try:
+            # Serialize cancellation and provider result publication with the same SQLite write
+            # lock. Whichever durable terminal decision obtains BEGIN IMMEDIATE first wins.
+            with self.store._transaction():
+                row = self.store._conn.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?",
+                    (layout.attempt.attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise StoreError(f"unknown attempt id: {layout.attempt.attempt_id}")
+                if row["ended_at"] is not None:
+                    if row["status"] == "CANCELLED":
+                        finalized_row = row
+                    else:
+                        raise StoreError(f"attempt {layout.attempt.attempt_id} is already finalized")
+                else:
+                    # The filesystem cannot participate in SQLite's transaction. Create the
+                    # immutable result while holding the write lock and remove only our newly
+                    # created file if a later DB operation rolls back. A process crash can still
+                    # leave an orphan file, but it cannot publish a conflicting durable DB row.
+                    with layout.result_path.open("x", encoding="utf-8", newline="\n") as stream:
+                        created_result_file = True
+                        json.dump(safe_result, stream, indent=2, sort_keys=True, ensure_ascii=False)
+                        stream.write("\n")
+                    self.store._conn.execute(
+                        """
+                        INSERT INTO artifacts(task_id, attempt_id, kind, path, metadata_json, created_at)
+                        VALUES (?, ?, 'result', ?, '{}', ?)
+                        """,
+                        (
+                            layout.attempt.task_id,
+                            layout.attempt.attempt_id,
+                            result_relative,
+                            utc_now(),
+                        ),
+                    )
+                    ended_at = utc_now()
+                    cursor = self.store._conn.execute(
+                        """
+                        UPDATE attempts
+                        SET status=?, result_json=?, ended_at=?, exit_status=?
+                        WHERE attempt_id=? AND ended_at IS NULL
+                        """,
+                        (
+                            status,
+                            result_json,
+                            ended_at,
+                            exit_status,
+                            layout.attempt.attempt_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StoreError(
+                            f"attempt {layout.attempt.attempt_id} changed before result publication"
+                        )
+                    finalized_row = self.store._conn.execute(
+                        "SELECT * FROM attempts WHERE attempt_id=?",
+                        (layout.attempt.attempt_id,),
+                    ).fetchone()
+        except BaseException:
+            if created_result_file:
+                try:
+                    layout.result_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+        if finalized_row is None:
+            raise StoreError(f"attempt {layout.attempt.attempt_id} finalization produced no durable row")
+        return self.store._attempt_row(finalized_row)

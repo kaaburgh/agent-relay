@@ -8,51 +8,41 @@ In progress: `R26`.
 
 Next bounded unit: `R26` — Final correctness/security review and required demonstration.
 
-Acceptance pending: close the remaining adversarial findings, add the final review/connection documentation, then rerun the R26-specific acceptance, full regression suite, all twelve required deterministic scenarios and seeded >=100-workflow chaos demonstration before marking the project complete.
+Acceptance pending: finish the remaining read-only adversarial review, add the final review/connection documentation and its CI contract, then run the final R26-specific/full/required-scenario/seeded-chaos demonstration before marking the project complete.
 
-## Latest R26 durable fact — result-publication race targeted GREEN, full-suite compatibility regression RED
+## Latest R26 durable fact — result publication vs cancellation CLOSED
 
-The cancellation/result-publication race itself is fixed by production commit `932395d60fce186ea8656d9a4acaf5d5087b665e`. `ArtifactManager.finalize_attempt()` now re-reads terminal state under `BEGIN IMMEDIATE` and serializes result-file creation, result-artifact insertion and attempt terminal DB update while holding the same SQLite writer lock. If cancellation obtained the lock first, the provider path returns the durable `CANCELLED` attempt without publishing a result. If result finalization obtained the lock first, cancellation cannot interleave with partial publication.
+The attempt result-publication race is closed with targeted red/green evidence and a green full regression suite.
 
-GitHub Actions run `34847243860` on `932395d60fce186ea8656d9a4acaf5d5087b665e` established two facts:
+Red: test commit `54625a22de269b9e9196de62076d4d3a550d85c6`, GitHub Actions run `34846974177`: FAILED, 164 tests with exactly one error. A real durable cancellation committed immediately after the provider's unfinished precheck; old `ArtifactManager.finalize_attempt()` continued toward result publication and later raised `StoreError: attempt 1 is already finalized`.
 
-1. The new targeted adversarial test `test_cancellation_between_precheck_and_result_commit_cannot_publish_late_result` **passed**. This closes the originally demonstrated cancellation interleaving at the targeted level.
-2. The full suite still failed: 164 tests with exactly one error in the pre-existing `ArtifactTests.test_result_is_written_once_and_attempt_cannot_be_refinalized`. That test deliberately expects a second non-cancelled `finalize_attempt()` call to retain the historical write-once filesystem contract and raise `FileExistsError`. The new fast terminal precheck instead raises `StoreError: attempt 1 is already finalized` before touching the immutable result path.
+Serialization fix: `932395d60fce186ea8656d9a4acaf5d5087b665e` re-read attempt terminal state under `BEGIN IMMEDIATE` and serialized result-file creation, result-artifact insertion and attempt terminal DB update under the same SQLite writer lock. The targeted cancellation-race test passed, proving cancellation can win without late result publication.
 
-This is a compatibility regression in externally observable artifact semantics, not a failure of the new cancellation serialization. The repair must preserve both invariants:
+The first full suite on that fix, run `34847243860`, then found one compatibility regression: the historical write-once artifact contract expected a second ordinary non-cancelled `finalize_attempt()` to raise `FileExistsError`, while the new early terminal check raised `StoreError` instead. That CI fact was checkpointed before repair.
 
-- `CANCELLED` wins without publishing late result evidence;
-- a second ordinary/non-cancelled finalize remains rejected with `FileExistsError` when the immutable result file already exists.
+Compatibility fix: `b50313a296eeffb4dd5c99cfbe84f28d54abf20d` preserves both invariants. `CANCELLED` remains a durable winner that returns without publishing provider result evidence; ordinary duplicate finalization preserves the existing immutable-result `FileExistsError` behavior.
 
-Exact next action:
-
-1. Adjust `ArtifactManager.finalize_attempt()` terminal handling so an already-finalized non-cancelled attempt with an existing immutable result path raises `FileExistsError` as before, both on the cheap precheck and on a concurrent terminal re-read under the write transaction. Do not weaken the `CANCELLED` fast/rechecked return path.
-2. Rerun both the targeted cancellation-race test and `ArtifactTests.test_result_is_written_once_and_attempt_cannot_be_refinalized` to green; checkpoint that fact.
-3. Run the full suite; only after it is green continue the final read-only audit/documentation work.
-
-## Previous R26 finding — result publication race RED evidence
-
-Test commit `54625a22de269b9e9196de62076d4d3a550d85c6`, run `34846974177`: FAILED, 164 tests with exactly one error. Cancellation committed immediately after the provider's unfinished precheck and old code later raised `StoreError` at `Store.finish_attempt()` after crossing the result-publication boundary.
-
-## R26 finding — stale lease reclaim TOCTOU CLOSED
-
-Red `34846111400` proved a heartbeat refreshed after candidate snapshot could still be reclaimed. Fix `af5e606693937400c8fa514a02655c5412b565d9` revalidates heartbeat/ownership/RUNNING-process state and commits release/event under one write transaction. Green `34846335634`: PASS, 163 tests.
-
-## R26 finding — process-group cancellation CLOSED
-
-Production `cd28a8027da1c0b21fa46296995dbf1d7485e349` made process-group existence authoritative instead of leader-PID liveness. Run `34845859463`: PASS, 162 tests, including the previously red orphan-cancellation test.
+Final green: GitHub Actions run `34847495507` on `b50313a296eeffb4dd5c99cfbe84f28d54abf20d`: PASS, 164 tests in 45.452s on Python 3.12.14. Both `test_cancellation_between_precheck_and_result_commit_cannot_publish_late_result` and `ArtifactTests.test_result_is_written_once_and_attempt_cannot_be_refinalized` passed, together with all twelve required deterministic scenarios and the seeded 100-workflow chaos sweep.
 
 ## Other R26 findings already closed
 
-- unbounded subprocess logs — bounded tail capture with continuous drain;
-- external cancellation vs in-memory process finalization — durable-state reconciliation;
-- normal parent exit with inherited child — remaining process-group cleanup;
-- stale writer ownership during idempotent candidate freeze — exact owner/provenance validation;
-- unsafe local shell/destructive Git cleanup — source audit confirms no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
+- **Unbounded subprocess logs** — confirmed red; bounded tail capture with continuous pipe draining prevents pipe deadlock and unbounded attempt-log growth.
+- **External cancellation vs in-memory process finalization** — confirmed red; `ManagedProcess.wait()` reconciles already-durable terminal state instead of double-finalizing.
+- **Normal parent exit with inherited child** — remaining same-process-group children are cleaned after leader exit, with leader death separated from pipe EOF.
+- **Operator cancellation after leader exit** — red `34841585992`; group-liveness fix `cd28a8027da1c0b21fa46296995dbf1d7485e349`; green `34845859463`.
+- **Idempotent candidate freeze with stale writer ownership** — exact writer ownership and predecessor/current-generation provenance are required; fixed at `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`.
+- **Stale lease reclaim heartbeat race** — red `34846111400`; atomic revalidation/release fix `af5e606693937400c8fa514a02655c5412b565d9`; green `34846335634`.
+- **Cancellation vs provider result publication** — red `34846974177`; serialized publication plus compatibility fix; green `34847495507`.
+- **Unsafe local shell/destructive Git cleanup** — source audit confirms no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
 
 ## Remaining R26 audit scope
 
-After the artifact compatibility regression is closed, R26 must still finish the read-only store/evidence/recovery/provider audit; document the intentionally fail-closed ordinary real `agent-relay run` composition boundary; add `docs/final-review.md` with findings/dispositions and exact authenticated Codex/Claude/local-or-SSH shadPS4 connection steps; add CI acceptance for that final review; and perform the final R26-specific/full/12-scenario/seeded-chaos demonstration on one final production HEAD.
+1. Finish a read-only pass across store/evidence/recovery/provider/artifact paths for any additional material duplicate-launch, crash-recovery, stale-provenance, lease-leak, history-loss or secret-leak findings. Any new material finding must enter the red/checkpoint/fix/green loop before production changes.
+2. Explicitly assess crash consistency between SQLite attempt finalization and the managed filesystem result artifact. The current serialization closes concurrent cancellation, but SQLite and the filesystem cannot form one native transaction; determine whether an orphan `result.json` after a process crash requires recovery hardening or can be bounded/documented without violating the product contract.
+3. Document the production-composition boundary. Real Codex/Claude/shadPS4/SSH adapters are individually acceptance-tested, while ordinary top-level `agent-relay run` remains intentionally fail-closed instead of claiming an integrated real-provider pipeline that does not exist.
+4. Add `docs/final-review.md` with findings/dispositions and exact safe Codex/Claude/local-or-SSH shadPS4 connection steps, including shared-storage/artifact-transfer limitations and the current CLI-composition limitation.
+5. Add R26 acceptance so the final-review document and declared limitations cannot silently drift.
+6. Run final R26-specific tests, full `python -m unittest discover -s tests -v`, all twelve deterministic required scenarios and seeded >=100 chaos workflows on the same final production HEAD.
 
 Only after those gates may `R26` move to `DONE`.
 

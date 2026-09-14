@@ -433,26 +433,27 @@ class ShadPS4BloodborneValidator:
 
         if process_result.state == "FAILED" and process_result.returncode == 0:
             kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
-            reason = "supervisor reported FAILED despite zero child exit"
+            reason = "supervisor reported FAILED despite zero wrapper exit"
         elif process_result.state not in {"SUCCEEDED", "FAILED"}:
             kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
             reason = process_result.state
-        elif process_result.returncode != 0:
+        elif checkpoint_error is not None:
+            if process_result.state == "FAILED" or process_result.returncode != 0:
+                kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
+                reason = f"wrapper exit {process_result.returncode}; {checkpoint_error}"
+            else:
+                kind = ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE
+                reason = checkpoint_error
+        elif checkpoint_status != 0:
             if evidence_error is not None and _explicit_validation_failure(evidence_error):
                 kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
                 reason = evidence_error
             elif evidence_error is None:
                 kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
-                reason = f"runner exit {process_result.returncode}"
+                reason = f"harness exit {checkpoint_status}"
             else:
                 kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
-                reason = f"runner exit {process_result.returncode}; {evidence_error}"
-        elif checkpoint_error is not None:
-            kind = ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE
-            reason = checkpoint_error
-        elif checkpoint_status != 0:
-            kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
-            reason = f"process exit checkpoint reports {checkpoint_status}"
+                reason = f"harness exit {checkpoint_status}; {evidence_error}"
         elif evidence_error is not None:
             if _explicit_validation_failure(evidence_error):
                 kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
@@ -460,9 +461,16 @@ class ShadPS4BloodborneValidator:
                 kind = ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE
             reason = evidence_error
         else:
+            # The wrapper may itself fail after atomically publishing the child's terminal
+            # checkpoint. Once that checkpoint proves exit 0, it is the authoritative harness
+            # outcome; wrapper lifecycle remains visible in process metadata below.
             kind = ShadPS4ValidationResultKind.SUCCESS
             reason = None
 
+        authoritative_exit_status = (
+            checkpoint_status if checkpoint_error is None and checkpoint_status is not None
+            else process_result.returncode
+        )
         normalized = {
             "kind": kind.value,
             "adapter": "shadps4-bloodborne",
@@ -483,6 +491,7 @@ class ShadPS4BloodborneValidator:
             "process": {
                 "state": process_result.state,
                 "returncode": process_result.returncode,
+                "harness_exit_status": checkpoint_status if checkpoint_error is None else None,
                 "pid": process_result.pid,
                 "started_at": process_result.started_at,
                 "ended_at": process_result.ended_at,
@@ -492,7 +501,7 @@ class ShadPS4BloodborneValidator:
             invocation.layout,
             status=kind.value,
             result=normalized,
-            exit_status=process_result.returncode,
+            exit_status=authoritative_exit_status,
         )
         return ShadPS4ValidationResult(
             kind=kind,

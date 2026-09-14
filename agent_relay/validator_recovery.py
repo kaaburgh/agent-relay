@@ -295,19 +295,37 @@ def reconcile_validation_attempt(
             f"validator terminal checkpoint proves nonzero exit {exit_status}; cannot recover success",
         )
 
-    # A process already durably finalized as a failure cannot be rewritten into success merely
-    # because external evidence later looks complete (e.g. capture failure with exit zero).
-    if process is not None and process["state"] not in {"RUNNING", "SUCCEEDED"}:
-        return ValidationRecoveryResult(
-            "AMBIGUOUS",
-            attempt_id,
-            None,
-            f"durable process state is {process['state']!r}, not a successful recoverable state",
-        )
-    if process is not None and process["state"] == "SUCCEEDED" and process["exit_status"] not in {0, None}:
-        return ValidationRecoveryResult(
-            "AMBIGUOUS", attempt_id, None, "durable successful process has nonzero exit status"
-        )
+    if process is not None:
+        process_state = process["state"]
+        process_exit_status = process["exit_status"]
+        if process_state in {"CAPTURE_FAILED", "TIMED_OUT", "STALLED", "CANCELLED", "TERMINATED"}:
+            return ValidationRecoveryResult(
+                "AMBIGUOUS",
+                attempt_id,
+                None,
+                f"durable process state is {process_state!r}, not a successful recoverable state",
+            )
+        if process_state == "SUCCEEDED" and process_exit_status not in {0, None}:
+            return ValidationRecoveryResult(
+                "AMBIGUOUS", attempt_id, None, "durable successful process has nonzero exit status"
+            )
+        if process_state == "FAILED" and process_exit_status in {0, None}:
+            return ValidationRecoveryResult(
+                "AMBIGUOUS",
+                attempt_id,
+                None,
+                "durable FAILED wrapper has no nonzero wrapper exit to explain its failure",
+            )
+        if process_state not in {"RUNNING", "SUCCEEDED", "FAILED"}:
+            return ValidationRecoveryResult(
+                "AMBIGUOUS",
+                attempt_id,
+                None,
+                f"durable process state is {process_state!r}, not a known recoverable wrapper state",
+            )
+        # FAILED with a nonzero wrapper exit is recoverable when the child-owned checkpoint
+        # already proves that the harness itself completed successfully. The wrapper failure
+        # remains immutable process metadata and is not rewritten below.
 
     metadata = {"run_id": run_id, "generation": generation, "candidate_sha": candidate_sha}
     for kind, path in (

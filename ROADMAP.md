@@ -66,13 +66,13 @@ Depends on R14,R15,R17. `tests/test_required_integration_scenarios.py` exposes t
 ## R19 — Chaos/stress and invariant sweeps — DONE
 Depends on R18. A reproducible chaos runner creates a fresh tiny real Git repository and SQLite state for every workflow, executes real simulated subprocesses, and injects happy/rework, writer crash, provider wait/retry, validation failure/incomplete evidence, malformed review, delayed result, writer restart/recovery, and tool crash modes. The run guarantees every injection mode occurs, records seed/progress/failure in `chaos-report.json`, and checks provenance, DONE gates, writer ownership, candidate-event consistency and resource-capacity invariants after every workflow. Required demonstration ran 100 workflows with seed `20260914` successfully.
 
-## R20 — Operator CLI and doctor — READY
-Depends on R18. Complete durable `task create/run/status/events/resume/cancel/doctor`; status exposes stage/candidate/process/time/event/review/retry/leases; doctor checks local prerequisites/auth usability without leaking secrets.
+## R20 — Operator CLI and doctor — DONE
+Depends on R18. Durable `task create/status/events/resume/cancel/doctor` now operate on the SQLite state directory and task snapshots. `status` reports candidate/process/event/review/retry/lease state; `cancel` terminates managed process groups before the durable transition; `resume` refuses unsafe duplicate relaunch. `doctor` checks Python/Git/SQLite, configured executables/runners/resources, and optional repository/baseline readiness without credentials. `run --simulation` executes the real simulated writer/validator/reviewer pipeline; ordinary `run` remains fail-closed until the configured real adapters are installed rather than inventing success.
 
-## R21 — Real Codex writer adapter — FUTURE
-Depends on R18,R20. Isolated authenticated Codex CLI adapter with configurable model/reasoning effort; capture command/PID/timestamps/exit/output/session/handoff/usage where exposed and classify provider unavailability. Test via CLI-compatible fake when real auth is unavailable.
+## R21 — Real Codex writer adapter — DONE
+Depends on R18,R20. The authenticated local Codex CLI is isolated behind a writer adapter using current non-interactive `codex exec` JSONL semantics, configurable model/reasoning/sandbox/approval/network settings and prompt delivery over stdin rather than persisted argv. It captures durable command/process metadata, thread/session ID, final agent-message handoff, token usage, stdout/stderr and candidate SHA; rate-limit/unavailability is distinct from process/malformed failures. Success requires a clean committed descendant of the frozen baseline. CLI-compatible fake tests cover argv/stdin shape, success, rate limit, malformed output, timeout and exit-zero/no-commit failure.
 
-## R22 — Real Claude reviewer adapter/package — FUTURE
+## R22 — Real Claude reviewer adapter/package — READY
 Depends on R18,R20. Fresh authenticated Claude CLI process against exact-candidate dedicated worktree; bounded package contains task/criteria/baseline/candidate/diff/paths/deterministic evidence/commands/labeled writer claims, never private writer reasoning.
 
 ## R23 — Real shadPS4/Bloodborne tool adapter — FUTURE

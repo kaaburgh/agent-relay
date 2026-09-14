@@ -41,6 +41,12 @@ async def wait_with_file_progress_watchdog(
     only the supplied evidence paths, so a process can remain alive while still being judged
     stalled. The managed process's absolute stage-timeout deadline remains authoritative and
     is checked independently of stall progress. Polling emits no semantic events.
+
+    Crossing the stall threshold creates a stall *candidate*. The same unchanged evidence
+    token must still be observed on the next poll before the process is terminated. This
+    confirmation avoids declaring a legitimate process stalled merely because the event loop
+    or child process was descheduled around the exact threshold boundary; it delays genuine
+    stall cleanup by at most one poll interval.
     """
     if stall_timeout_seconds <= 0:
         raise WatchdogError("stall_timeout_seconds must be positive")
@@ -52,6 +58,7 @@ async def wait_with_file_progress_watchdog(
     paths = tuple(Path(value) for value in progress_paths)
     token = file_progress_token(paths)
     last_progress = time.monotonic()
+    stall_candidate_token: tuple[tuple[str, bool, int | None, int | None], ...] | None = None
     waiter = asyncio.create_task(process.process.wait())
     try:
         while True:
@@ -76,9 +83,23 @@ async def wait_with_file_progress_watchdog(
             if current != token:
                 token = current
                 last_progress = now
+                stall_candidate_token = None
                 continue
-            if now - last_progress >= stall_timeout_seconds:
-                return await process.terminate(state="STALLED")
+
+            if now - last_progress < stall_timeout_seconds:
+                stall_candidate_token = None
+                continue
+
+            if stall_candidate_token != current:
+                stall_candidate_token = current
+                continue
+
+            # Recheck process completion immediately before destructive cleanup so a process
+            # that completed between the poll and this decision is finalized as success/fail,
+            # not as a stall.
+            if process.process.returncode is not None:
+                return await process.wait()
+            return await process.terminate(state="STALLED")
     finally:
         if not waiter.done():
             waiter.cancel()

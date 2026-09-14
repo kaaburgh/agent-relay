@@ -48,10 +48,10 @@ Depends on R10. Provider unavailability is committed atomically as `WAITING_PROV
 ## R13 — Generic persisted resource leases — DONE
 Depends on R02,R09. Named resources have durable positive capacity and leases are acquired under `BEGIN IMMEDIATE`, making capacity checks atomic. Same-holder acquire is idempotent while active, release is ownership-checked, heartbeat does not emit event spam, and capacity-1/capacity-N behavior is tested. Independent resources do not serialize each other. Active leases survive database reopen; stale recovery only reclaims attempt-bound leases with stale heartbeat and no durable RUNNING process, tested against a real subprocess. Acquire/release emit semantic resource events.
 
-## R14 — Writer restart recovery — READY
-Depends on R07,R10. Real separately running fake worker plus orchestrator termination/restart; reconcile commit/result/process evidence and never duplicate completed writer work.
+## R14 — Writer restart recovery — DONE
+Depends on R07,R10. A separately running real fake writer survives closure of the first orchestrator Store, commits and writes its provider result independently, and is reconciled by a new Store from process/result/Git evidence into the original attempt and candidate generation. Live ownership prevents duplicate launch, missing-result/dead-process ambiguity fails closed, and repeated reconciliation is idempotent with exactly one writer attempt and one candidate event.
 
-## R15 — External-validation restart recovery — FUTURE
+## R15 — External-validation restart recovery — READY
 Depends on R09,R13. Recover/reconcile an expensive validator without duplicate launch; ambiguous ownership blocks safely.
 
 ## R16 — Cancellation, timeout, stall watchdog, cleanup — FUTURE

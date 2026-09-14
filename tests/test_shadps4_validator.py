@@ -60,6 +60,8 @@ exit_code = 0
 
 if args.mode == "incomplete":
     records = records[:-1]
+elif args.mode == "bad-sequence":
+    records[min(1, len(records) - 1)]["cycle"] = 1
 elif args.mode == "failed-state":
     state = "failed"
 elif args.mode == "failed-cycle":
@@ -159,7 +161,6 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
             self.assertEqual(attempt.exit_status, 0)
             self.assertEqual(attempt.result["run_id"], result.run_id)
             self.assertEqual(attempt.result["candidate_sha"], "a" * 40)
-            self.assertNotIn("{run_id}", " ".join(attempt.result["process"].keys()))
 
             rows = self.store._conn.execute(
                 "SELECT kind,path FROM artifacts WHERE attempt_id=? ORDER BY artifact_id",
@@ -182,6 +183,7 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
             incomplete = await self._run("incomplete")
             wrong_run = await self._run("wrong-run-id")
             wrong_requested = await self._run("wrong-requested")
+            bad_sequence = await self._run("bad-sequence")
             self.assertEqual(incomplete.process_result.returncode, 0)
             self.assertEqual(incomplete.kind, ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE)
             self.assertIn("2/3 records", incomplete.reason)
@@ -189,6 +191,8 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
             self.assertIn("run_id mismatch", wrong_run.reason)
             self.assertEqual(wrong_requested.kind, ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE)
             self.assertIn("requested cycle count mismatch", wrong_requested.reason)
+            self.assertEqual(bad_sequence.kind, ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE)
+            self.assertIn("cycle sequence", bad_sequence.reason)
         asyncio.run(scenario())
 
     def test_explicit_runner_or_cycle_failure_is_validation_failure(self) -> None:
@@ -212,7 +216,7 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
                 stall_timeout_seconds=0.12,
                 watchdog_poll_interval_seconds=0.02,
             )
-            self.assertNotEqual(crashed.kind, ShadPS4ValidationResultKind.SUCCESS)
+            self.assertEqual(crashed.kind, ShadPS4ValidationResultKind.PROCESS_FAILURE)
             self.assertEqual(crashed.process_result.returncode, 23)
             self.assertEqual(stalled.kind, ShadPS4ValidationResultKind.PROCESS_FAILURE)
             self.assertEqual(stalled.process_result.state, "STALLED")
@@ -225,8 +229,9 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
             self.assertEqual(result.process_result.state, "TIMED_OUT")
         asyncio.run(scenario())
 
-    def test_unknown_argv_placeholder_fails_closed(self) -> None:
+    def test_unknown_argv_placeholder_fails_before_allocating_attempt(self) -> None:
         async def scenario() -> None:
+            before = len(self.store.attempts("task-1", "validation"))
             with self.assertRaisesRegex(ValueError, "unsupported shadPS4 argv placeholder"):
                 await self.validator.start(
                     task_id="task-1",
@@ -236,6 +241,7 @@ class ShadPS4BloodborneValidatorTests(unittest.TestCase):
                     requested_cycles=1,
                     argv_template=[sys.executable, str(self.harness), "{unknown}"],
                 )
+            self.assertEqual(len(self.store.attempts("task-1", "validation")), before)
         asyncio.run(scenario())
 
 

@@ -51,10 +51,10 @@ Depends on R02,R09. Named resources have durable positive capacity and leases ar
 ## R14 — Writer restart recovery — DONE
 Depends on R07,R10. A separately running real fake writer survives closure of the first orchestrator Store, commits and writes its provider result independently, and is reconciled by a new Store from process/result/Git evidence into the original attempt and candidate generation. Live ownership prevents duplicate launch, missing-result/dead-process ambiguity fails closed, and repeated reconciliation is idempotent with exactly one writer attempt and one candidate event.
 
-## R15 — External-validation restart recovery — READY
-Depends on R09,R13. Recover/reconcile an expensive validator without duplicate launch; ambiguous ownership blocks safely.
+## R15 — External-validation restart recovery — DONE
+Depends on R09,R13. A separately running real fake validator can survive Store closure while retaining a persisted resource lease. Reconciliation requires complete run-ID/N-of-N machine evidence before finalizing the original attempt, recording validation and releasing the lease. Live ownership prevents duplicate launch. Dead process with incomplete evidence returns `AMBIGUOUS`, creates no validation record and intentionally retains the lease so an expensive runtime cannot overlap under uncertain ownership.
 
-## R16 — Cancellation, timeout, stall watchdog, cleanup — FUTURE
+## R16 — Cancellation, timeout, stall watchdog, cleanup — READY
 Depends on R06,R09. Distinguish timeout/stall/crash/provider-unavailable/legitimate long run; preserve evidence; SIGTERM then forced SIGKILL; no event spam.
 
 ## R17 — Review/error guardrails and correction limit — FUTURE

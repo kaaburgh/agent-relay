@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import stat
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from agent_relay.supervisor import SubprocessSupervisor
 _FAKE_SSH = r'''#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,10 +34,36 @@ capture.write_text(json.dumps({"argv": sys.argv[1:], "stdin": script}), encoding
 print("fake-ssh-stdout")
 print("fake-ssh-stderr", file=sys.stderr)
 mode = os.environ.get("FAKE_SSH_MODE", "success")
+if mode == "execute":
+    completed = subprocess.run(
+        ["/bin/sh", "-s"],
+        input=script,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    raise SystemExit(completed.returncode)
 if mode == "sleep":
     time.sleep(300)
 if mode == "nonzero":
     raise SystemExit(7)
+'''
+
+_REMOTE_HELPER = r'''
+import json
+import os
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+output.write_text(json.dumps({
+    "argv": sys.argv[2:],
+    "cwd": os.getcwd(),
+    "remote_value": os.environ.get("REMOTE_VALUE"),
+}), encoding="utf-8")
 '''
 
 
@@ -148,6 +177,46 @@ class SSHExternalToolRunnerTests(unittest.TestCase):
             self.assertEqual((row["state"], row["exit_status"]), ("SUCCEEDED", 0))
         asyncio.run(scenario())
 
+    def test_remote_shell_execution_preserves_hostile_arguments_without_interpretation(self) -> None:
+        async def scenario() -> None:
+            remote_base = self.root / "remote base"
+            remote_cwd = remote_base / "run dir"
+            remote_cwd.mkdir(parents=True)
+            helper = self.root / "remote_helper.py"
+            helper.write_text(textwrap.dedent(_REMOTE_HELPER), encoding="utf-8")
+            output = self.root / "remote-result.json"
+            marker = self.root / "shell-injection-marker"
+            dangerous = f"$(touch {marker})"
+            runner = SSHExternalToolRunner(
+                supervisor=SubprocessSupervisor(self.store),
+                config=RunnerConfig(
+                    kind="ssh",
+                    executable=str(self.fake_ssh),
+                    host="gpu.example.invalid",
+                    user="ubuntu",
+                    base_dir=str(remote_base),
+                ),
+            )
+            os.environ["FAKE_SSH_MODE"] = "execute"
+            expected_args = ["a b", "semi;colon", dangerous, "quote'arg"]
+            process = await runner.start(
+                task_id="task-1",
+                argv=[sys.executable, str(helper), str(output), *expected_args],
+                cwd="run dir",
+                env_additions={"REMOTE_VALUE": "value;$(echo not-code) 'quoted'"},
+                stdout_path=self.root / "execute.out",
+                stderr_path=self.root / "execute.err",
+                timeout_seconds=5.0,
+            )
+            result = await process.wait()
+            self.assertEqual((result.state, result.returncode), ("SUCCEEDED", 0))
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["argv"], expected_args)
+            self.assertEqual(payload["cwd"], str(remote_cwd))
+            self.assertEqual(payload["remote_value"], "value;$(echo not-code) 'quoted'")
+            self.assertFalse(marker.exists())
+        asyncio.run(scenario())
+
     def test_nonzero_remote_transport_exit_is_failed(self) -> None:
         async def scenario() -> None:
             os.environ["FAKE_SSH_MODE"] = "nonzero"
@@ -187,7 +256,7 @@ class SSHExternalToolRunnerTests(unittest.TestCase):
                 argv=["true"],
                 env_additions={"BAD-NAME": "value"},
             )
-        with self.assertRaisesRegex(SSHRunnerError, "must not contain '\.\.'"):
+        with self.assertRaisesRegex(SSHRunnerError, r"must not contain '\.\.'"):
             build_ssh_transport_plan(self.config, argv=["true"], cwd="../escape")
         with self.assertRaisesRegex(SSHRunnerError, "remain under configured base_dir"):
             build_ssh_transport_plan(self.config, argv=["true"], cwd="/tmp/outside")

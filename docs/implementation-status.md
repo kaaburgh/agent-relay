@@ -2,29 +2,29 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`.
+Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`.
 
-Next bounded unit: `R11 — REQUEST_CHANGES/rework generations`.
+Next bounded unit: `R12 — Provider-unavailable wait/retry`.
 
-## R01–R09 summary
+## R01–R10 summary
 
-Task/config parsing and CLI routing exist; SQLite durable state/events are versioned and transactional; workflow policy enforces exact candidate/validation/review provenance; attempt/evidence history is immutable/redacted where implemented; managed writer/reviewer worktrees use real Git; subprocess supervision uses real process groups; simulated writer/reviewer/validator workers are real processes and machine-readable evidence is fail-closed.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated writer/reviewer/validator workers and one complete happy-path orchestration to `DONE` are implemented and tested with real temporary Git/SQLite/processes.
 
-## R10 evidence
+## R11 evidence
 
-Implemented `agent_relay/evidence.py`, `agent_relay/orchestrator.py` and `tests/test_orchestrator_happy_path.py`.
+Implemented the first correction loop in `agent_relay/orchestrator.py`, added review feedback to simulated writer attempt inputs, added DB-level append-only guards for validation/review evidence, and added `tests/test_orchestrator_rework.py`.
 
-The first full deterministic workflow now runs with real temporary Git, SQLite and subprocesses:
+The integration scenario proves:
 
-- `READY -> WORK` starts a simulated writer in an isolated managed writer worktree;
-- the writer makes a real commit and that exact SHA becomes candidate generation 1;
-- `WORK -> VALIDATE` runs the real-process simulated expensive validator and persists validation evidence for generation 1/SHA;
-- only complete N/N deterministic validator evidence permits `VALIDATE -> REVIEW`;
-- the reviewer receives a separate detached worktree at the exact candidate SHA and runs as an independent fresh subprocess;
-- valid structured `APPROVE` is persisted as a review record tied to the same generation/SHA;
-- `REVIEW -> DONE` consumes exact validation/review provenance through workflow invariants;
-- persisted event history is exactly `task_created`, `stage_started`, `candidate_commit_detected`, `validation_started`, `validation_finished`, `review_started`, `review_finished`, `task_completed` for the happy path;
-- writer/validation/reviewer each have separate immutable attempts.
+- generation 1 is implemented, validated, and independently reviewed as `REQUEST_CHANGES`;
+- the structured HIGH finding is persisted and copied into the fresh `writer-002/inputs.json` as `review_feedback`;
+- rework uses the existing isolated writer branch but requires a new real commit descended from generation 1;
+- the new commit is frozen as candidate generation 2 rather than mutating generation 1;
+- generation-2 validation and review use only the generation-2 SHA;
+- generation 1 validation/review remain queryable and unchanged after generation 2 exists;
+- the second review has a fresh invocation ID and a separate generation-2 detached reviewer worktree;
+- direct SQL UPDATE/DELETE of historical reviews is rejected by append-only triggers;
+- semantic history contains two candidate detections, two validation completions, two review completions, `review_requested_changes`, and final `task_completed`.
 
 Acceptance command:
 
@@ -32,26 +32,24 @@ Acceptance command:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions on `d1047264f0a02ad69a35a1ea46eeed68607551bc`: PASS, 73 tests on Python 3.12.14.
+GitHub Actions on `a929124dabbee2101ffd0553574a9c42ee20acfb`: PASS. The previous 73-test suite plus the R11 integration scenario completed successfully on Python 3.12.
 
 ## Current product state
 
-The simulation stack can now complete one full implementation/validation/independent-review workflow to `DONE` with exact durable candidate provenance. Next is the correction loop: immutable first review, findings supplied to fresh rework, a second candidate generation, revalidation and a fresh reviewer invocation against generation 2.
+The deterministic simulation now supports a complete happy path and one full `REQUEST_CHANGES -> REWORK -> new generation -> validation -> fresh review -> DONE` cycle with durable provenance. Next is normal provider unavailability: persist wait metadata and retry timing without busy-spin, then resume the exact interrupted workflow/candidate state.
 
 ## Durable decisions
 
 - Python 3.12 / Linux-first.
 - Deterministic orchestrator; models are bounded workers, never state-machine owners.
 - Simulation-first; real providers/runtime follow deterministic integration/recovery behavior.
-- SQLite is versioned/fail-closed; semantic events are append-only.
+- SQLite is versioned/fail-closed; semantic events and validation/review evidence are append-only once evidence guards are installed.
 - Workflow transitions use optimistic compare-and-set rather than last-writer-wins.
-- Durable snapshots/managed command records are redacted before persistence.
-- Existing user checkouts are never cleaned/reset automatically; all agent mutations occur in dedicated managed worktrees.
+- Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
-- Simulated workers write durable out-of-process result/evidence checkpoints suitable for restart/recovery tests.
 - Reviewer approval is possible only after strict structured-output validation for the exact candidate generation/SHA.
 - External validation does not trust exit zero; deterministic evidence completeness is authoritative when available.
-- Workflow transitions consume persisted validation/review evidence provenance, not provider claims alone.
+- Rework creates a new candidate generation and receives prior structured review findings as explicit immutable inputs.
 - Bloodborne-specific behavior stays outside orchestration core.
 
 ## Handoff protocol

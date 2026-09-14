@@ -68,12 +68,16 @@ def process_ownership_state(store: Store, process_row: Any) -> OwnershipState:
     if stat is None:
         return "LIVE" if _group_has_owned_member(identity) else "DEAD"
     state, pgrp, session, start = stat
-    if (
-        state != "Z"
-        and start == identity.start_time_ticks
+    exact_identity = (
+        start == identity.start_time_ticks
         and pgrp == identity.process_group_id
         and session == identity.session_id
-    ):
+    )
+    if exact_identity and state != "Z":
         return "LIVE"
-    # A live process exists at the recorded PID but it is not the process we launched.
+    if exact_identity and state == "Z":
+        # The original leader is dead but can remain as a zombie until reaped. Descendants
+        # in the same persisted process group/session are still ours and must be cleanable.
+        return "LIVE" if _group_has_owned_member(identity) else "DEAD"
+    # A live/reused process exists at the recorded PID but it is not the process we launched.
     return "MISMATCH"

@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from .artifacts import ArtifactManager, AttemptLayout
 from .store import Store
 from .supervisor import ProcessResult, SubprocessSupervisor
+from .watchdog import wait_with_file_progress_watchdog
 
 
 class ValidationResultKind(StrEnum):
@@ -152,8 +153,26 @@ class SimulatedValidator:
             return completed, rows, "cycle sequence is incomplete or out of order"
         return completed, rows, None
 
-    async def finish(self, invocation: SimulatedValidationInvocation) -> SimulatedValidationResult:
-        process_result = await invocation.process.wait()
+    async def finish(
+        self,
+        invocation: SimulatedValidationInvocation,
+        *,
+        stall_timeout_seconds: float | None = None,
+        watchdog_poll_interval_seconds: float = 0.05,
+    ) -> SimulatedValidationResult:
+        if stall_timeout_seconds is None:
+            process_result = await invocation.process.wait()
+        else:
+            process_result = await wait_with_file_progress_watchdog(
+                invocation.process,
+                progress_paths=(
+                    invocation.evidence_dir / "runner-status.json",
+                    invocation.evidence_dir / "cycles.csv",
+                    invocation.evidence_dir / "summary.md",
+                ),
+                stall_timeout_seconds=stall_timeout_seconds,
+                poll_interval_seconds=watchdog_poll_interval_seconds,
+            )
         completed, metrics, evidence_error = self._read_evidence(invocation)
         if process_result.state not in {"SUCCEEDED", "FAILED"}:
             kind = ValidationResultKind.PROCESS_FAILURE
@@ -196,6 +215,16 @@ class SimulatedValidator:
             reason=reason,
         )
 
-    async def run(self, **kwargs: Any) -> SimulatedValidationResult:
+    async def run(
+        self,
+        *,
+        stall_timeout_seconds: float | None = None,
+        watchdog_poll_interval_seconds: float = 0.05,
+        **kwargs: Any,
+    ) -> SimulatedValidationResult:
         invocation = await self.start(**kwargs)
-        return await self.finish(invocation)
+        return await self.finish(
+            invocation,
+            stall_timeout_seconds=stall_timeout_seconds,
+            watchdog_poll_interval_seconds=watchdog_poll_interval_seconds,
+        )

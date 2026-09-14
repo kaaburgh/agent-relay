@@ -102,6 +102,15 @@ def _touch_exclusive(path: Path) -> None:
         pass
 
 
+def _raise_already_finalized(layout: AttemptLayout, attempt_id: int) -> None:
+    # Preserve the historical write-once artifact contract for ordinary duplicate provider
+    # callbacks. Cancellation is special and is handled before this helper: it returns the
+    # durable CANCELLED outcome instead of exposing or replacing provider result evidence.
+    if layout.result_path.exists():
+        raise FileExistsError(str(layout.result_path))
+    raise StoreError(f"attempt {attempt_id} is already finalized")
+
+
 class ArtifactManager:
     """Creates durable, non-reused attempt directories and immutable snapshots."""
 
@@ -203,7 +212,7 @@ class ArtifactManager:
         if current.ended_at is not None:
             if current.status == "CANCELLED":
                 return current
-            raise StoreError(f"attempt {current.attempt_id} is already finalized")
+            _raise_already_finalized(layout, current.attempt_id)
 
         safe_result = redact(result)
         result_relative = str(layout.result_path.relative_to(self.root))
@@ -224,7 +233,7 @@ class ArtifactManager:
                     if row["status"] == "CANCELLED":
                         finalized_row = row
                     else:
-                        raise StoreError(f"attempt {layout.attempt.attempt_id} is already finalized")
+                        _raise_already_finalized(layout, layout.attempt.attempt_id)
                 else:
                     # The filesystem cannot participate in SQLite's transaction. Create the
                     # immutable result while holding the write lock and remove only our newly

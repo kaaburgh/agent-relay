@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, Any
+from typing import Literal, Mapping, Any, Sequence
 
 from .artifacts import ArtifactManager, AttemptLayout
 from .evidence import ValidationEvidence, record_validation
@@ -23,6 +23,11 @@ class ValidationRecoveryResult:
     attempt_id: int
     validation: ValidationEvidence | None
     reason: str | None = None
+
+
+_SUCCESS_STATES = {"completed", "complete", "success", "succeeded", "done", "passed"}
+_SUCCESS_CYCLE_STATUSES = {"ok", "success", "succeeded", "passed", "complete", "completed"}
+_CYCLE_ID_FIELDS = ("cycle", "cycle_id", "index")
 
 
 def _pid_is_live(pid: int) -> bool:
@@ -56,46 +61,127 @@ def _layout(artifact_root: Path, attempt: AttemptRow) -> AttemptLayout:
     )
 
 
+def _integer_field(value: Mapping[str, Any], *names: str) -> int | None:
+    for name in names:
+        raw = value.get(name)
+        if raw is None:
+            continue
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        return None
+    return None
+
+
+def _string_field(value: Mapping[str, Any], *names: str) -> str | None:
+    for name in names:
+        raw = value.get(name)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _load_cycle_records(
+    evidence_dir: Path,
+) -> tuple[tuple[Mapping[str, Any], ...], Path | None, str | None]:
+    csv_path = evidence_dir / "cycles.csv"
+    json_path = evidence_dir / "cycles.json"
+    if csv_path.exists():
+        try:
+            with csv_path.open("r", encoding="utf-8", newline="") as stream:
+                return tuple(dict(row) for row in csv.DictReader(stream)), csv_path, None
+        except OSError as exc:
+            return (), csv_path, f"cycles.csv is unreadable: {exc}"
+    if not json_path.exists():
+        return (), None, "cycles.csv/cycles.json is missing"
+    try:
+        value = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (), json_path, f"cycles.json is unreadable: {exc}"
+    if isinstance(value, Mapping):
+        value = value.get("cycles")
+    if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
+        return (), json_path, "cycles.json must be a list of objects or an object with a cycles list"
+    return tuple(dict(item) for item in value), json_path, None
+
+
+def _cycle_sequence_error(records: Sequence[Mapping[str, Any]]) -> str | None:
+    has_identifier = [any(name in record for name in _CYCLE_ID_FIELDS) for record in records]
+    if not any(has_identifier):
+        return None
+    if not all(has_identifier):
+        return "cycle identifiers are partially missing"
+    sequence = [_integer_field(record, *_CYCLE_ID_FIELDS) for record in records]
+    if any(value is None for value in sequence):
+        return "cycle identifiers are invalid"
+    if sequence != list(range(1, len(records) + 1)):
+        return "cycle sequence is incomplete or out of order"
+    return None
+
+
+def _cycle_success_error(records: Sequence[Mapping[str, Any]]) -> str | None:
+    for index, record in enumerate(records, start=1):
+        raw = _string_field(record, "status", "result", "outcome")
+        if raw is None:
+            return f"cycle {index} is missing status/result/outcome"
+        if raw.lower() not in _SUCCESS_CYCLE_STATUSES:
+            return f"cycle {index} did not prove success: {raw!r}"
+    return None
+
+
 def _complete_evidence(
     evidence_dir: Path,
     *,
     run_id: str,
     requested_cycles: int,
-) -> tuple[int, tuple[Mapping[str, Any], ...], str | None]:
+) -> tuple[int, tuple[Mapping[str, Any], ...], Path | None, str | None]:
     status_path = evidence_dir / "runner-status.json"
-    cycles_path = evidence_dir / "cycles.csv"
     summary_path = evidence_dir / "summary.md"
     if not status_path.exists():
-        return 0, (), "runner-status.json is missing"
+        return 0, (), None, "runner-status.json is missing"
     try:
         status = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return 0, (), f"runner-status.json is unreadable: {exc}"
-    completed = int(status.get("completed_cycles", 0))
-    if status.get("run_id") != run_id:
-        return completed, (), "runner status run_id mismatch"
-    if not cycles_path.exists():
-        return completed, (), "cycles.csv is missing"
-    try:
-        with cycles_path.open("r", encoding="utf-8", newline="") as stream:
-            rows = tuple(dict(row) for row in csv.DictReader(stream))
-    except OSError as exc:
-        return completed, (), f"cycles.csv is unreadable: {exc}"
+        return 0, (), None, f"runner-status.json is unreadable: {exc}"
+    if not isinstance(status, Mapping):
+        return 0, (), None, "runner-status.json root must be an object"
+
+    completed = _integer_field(status, "completed_cycles", "completedCycles", "cycles_completed")
+    if completed is None or completed < 0:
+        return 0, (), None, "completed cycle count is missing or invalid"
+    if _string_field(status, "run_id", "runId") != run_id:
+        return completed, (), None, "runner status run_id mismatch"
+    if _integer_field(status, "requested_cycles", "requestedCycles", "cycles_requested") != requested_cycles:
+        return completed, (), None, "requested cycle count mismatch"
+
+    rows, cycles_path, cycle_load_error = _load_cycle_records(evidence_dir)
+    if cycle_load_error is not None:
+        return completed, rows, cycles_path, cycle_load_error
     if not summary_path.exists():
-        return completed, rows, "summary.md is missing"
-    if status.get("state") != "completed":
-        return completed, rows, f"runner state is {status.get('state')!r}, not completed"
-    if int(status.get("requested_cycles", -1)) != requested_cycles:
-        return completed, rows, "requested cycle count mismatch"
+        return completed, rows, cycles_path, "summary.md is missing"
+
+    state = _string_field(status, "state", "status")
+    if state is None or state.lower() not in _SUCCESS_STATES:
+        return completed, rows, cycles_path, f"runner state is {state!r}, not a success state"
     if completed != requested_cycles:
-        return completed, rows, f"completed {completed}/{requested_cycles} cycles"
+        return completed, rows, cycles_path, f"completed {completed}/{requested_cycles} cycles"
     if len(rows) != requested_cycles:
-        return completed, rows, f"cycles.csv contains {len(rows)}/{requested_cycles} records"
-    if [row.get("cycle") for row in rows] != [str(index) for index in range(1, requested_cycles + 1)]:
-        return completed, rows, "cycle sequence is incomplete or out of order"
-    if any(row.get("status") != "ok" for row in rows):
-        return completed, rows, "one or more cycles did not succeed"
-    return completed, rows, None
+        name = cycles_path.name if cycles_path is not None else "cycle evidence"
+        return completed, rows, cycles_path, f"{name} contains {len(rows)}/{requested_cycles} records"
+
+    sequence_error = _cycle_sequence_error(rows)
+    if sequence_error is not None:
+        return completed, rows, cycles_path, sequence_error
+    success_error = _cycle_success_error(rows)
+    if success_error is not None:
+        return completed, rows, cycles_path, success_error
+    return completed, rows, cycles_path, None
 
 
 def _register_if_missing(
@@ -162,7 +248,7 @@ def reconcile_validation_attempt(
         return ValidationRecoveryResult("RUNNING", attempt_id, None)
 
     evidence_dir = Path(evidence_dir)
-    completed, rows, error = _complete_evidence(
+    completed, rows, cycles_path, error = _complete_evidence(
         evidence_dir, run_id=run_id, requested_cycles=requested_cycles
     )
     if error is not None:
@@ -172,12 +258,19 @@ def reconcile_validation_attempt(
             None,
             f"validator process is not live and durable evidence is incomplete: {error}",
         )
+    if cycles_path is None:
+        return ValidationRecoveryResult(
+            "AMBIGUOUS",
+            attempt_id,
+            None,
+            "validator process is not live and cycle evidence path is missing",
+        )
 
     artifact_root = Path(artifact_root)
     metadata = {"run_id": run_id, "generation": generation, "candidate_sha": candidate_sha}
     for kind, path in (
         ("runner_status", evidence_dir / "runner-status.json"),
-        ("cycles", evidence_dir / "cycles.csv"),
+        ("cycles", cycles_path),
         ("summary", evidence_dir / "summary.md"),
     ):
         _register_if_missing(

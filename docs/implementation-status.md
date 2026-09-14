@@ -2,35 +2,35 @@
 
 ## Current checkpoint
 
-Completed: `R00`–`R22`.
+Completed: `R00`–`R23`.
 
-In progress: `R23`.
+In progress: none.
 
-Next bounded unit: `R23` — Real shadPS4/Bloodborne tool adapter.
+Next bounded unit: `R24` — Minimal SSH external-tool runner.
 
-Acceptance pending: dedicated R23 acceptance coverage for the external shadPS4/Bloodborne adapter. The production adapter is present at HEAD, and the full pre-existing regression suite is green, but R23 is **not** complete until its own success/failure/evidence cases are directly exercised.
+## R23 evidence — real shadPS4/Bloodborne tool adapter
 
-## Durable recovery point
+Implemented and hardened `agent_relay/shadps4_validator.py`; added dedicated real-subprocess acceptance in `tests/test_shadps4_validator.py`.
 
-Current WIP implementation commit: `5e6365c6030b5c3873231546275e8e4510b983f9` (`R23: add external shadPS4 Bloodborne validation adapter`).
+Adapter guarantees:
 
-The commit adds `agent_relay/shadps4_validator.py` with an external-config boundary around the existing harness. It renders only allowed placeholders, supervises the external process, optionally applies the evidence-progress watchdog, reads `runner-status.json`, `cycles.csv`/`cycles.json`, and `summary.md`, validates run ID/requested/completed cycles and cycle statuses, and classifies success/failure/incomplete evidence/process failure. Bloodborne menu/death/reload behavior remains outside core orchestration.
+- Bloodborne/shadPS4 gameplay/death/reload behavior remains owned by the external harness; orchestration core knows only the process/evidence boundary;
+- only the explicit `{run_id}`, `{requested_cycles}`, and `{evidence_dir}` argv placeholders are accepted, and template errors fail before allocating a durable attempt;
+- the external process is supervised through the normal process-group/timeout machinery and may additionally use the evidence-progress stall watchdog;
+- `runner-status.json`, `cycles.csv` or `cycles.json`, and `summary.md` are normalized and registered as durable artifacts tied to exact generation/candidate/run ID;
+- success requires matching run ID, matching requested count, completed N/N, exactly N cycle records, a complete success runner state, no explicit failed cycle, and a valid ordered 1..N sequence when cycle identifiers are present;
+- exit zero with missing/incomplete/mismatched/out-of-order evidence is `INCOMPLETE_EVIDENCE`, never success;
+- explicit failed runner state or failed cycle is `VALIDATION_FAILED`;
+- abrupt process crash, timeout and watchdog stall remain `PROCESS_FAILURE` unless complete deterministic failure evidence proves a validation failure;
+- normalized result/attempt provenance preserves run ID, generation, candidate SHA, process outcome, paths and cycle evidence.
 
-GitHub Actions run `34832377976` on `5e6365c6030b5c3873231546275e8e4510b983f9`: PASS, 134 tests in 41.974s on Python 3.12.14. This proves no observed regression in the existing suite; it is deliberately **not** accepted as R23 completion evidence because there was no R23-specific test module in that run.
+The first dedicated R23 gate, GitHub Actions run `34834967782`, failed one of 143 tests. It exposed a production classification bug: the generic check `evidence_error.startswith("cycle ")` incorrectly treated the incomplete-evidence message `cycle evidence contains 2/3 records` as a deterministic validation failure. The fix narrows validation-failure classification to explicit runner failure or an actual cycle `reports failure status`, validates argv before attempt allocation, and validates cycle sequence when identifiers are present.
 
-Exact recovery action:
-
-1. Review `agent_relay/shadps4_validator.py` against R23/spec acceptance requirements.
-2. Add `tests/test_shadps4_validator.py` using a real fake external harness subprocess.
-3. Cover at minimum: successful N/N evidence, exit-zero incomplete evidence, runner/cycle failure, run-ID/request-count mismatch, CSV and JSON cycle evidence, process crash/nonzero, timeout/stall cleanup, placeholder validation, and durable artifact/attempt provenance.
-4. Run the R23-specific tests, then `python -m unittest discover -s tests -v`.
-5. Only after both are green, atomically mark R23 `DONE`, set R24 `READY`, update this file with exact evidence, and continue automatically.
+Final R23 acceptance: GitHub Actions run `34835209968` on `e4b882864cc1b84c3ccbca4c0f5ce5cb026b9d27`: PASS, 143 tests in 129.519s on Python 3.12.14. All seven dedicated R23 test methods passed together with the full regression/100-workflow chaos suite.
 
 ## Protocol repair after the R23 partial-stop incident
 
-The previous handoff could drift because HEAD contained R23 production code, `ROADMAP.md` still said R23 `READY`, `docs/implementation-status.md` was stale at R21/R22, and the general regression CI remained green. That state is no longer considered acceptable.
-
-Protocol changes now required by `AGENTS.md`:
+Development protocol was hardened before R23 acceptance:
 
 - a new unit moves to `IN PROGRESS` before/with partial implementation landing;
 - a full regression suite does not prove a unit complete without unit-specific acceptance coverage;
@@ -38,6 +38,8 @@ Protocol changes now required by `AGENTS.md`:
 - roadmap/status transitions should use one atomic Git tree commit when possible;
 - every tool/session closeout runs an explicit acceptance/status/recovery checklist;
 - `tests/test_project_status.py` machine-checks agreement between roadmap and implementation status so metadata drift makes CI red.
+
+The new guard immediately caught a formatting inconsistency in the first repaired handoff, proving the metadata contract is active; the corrected protocol CI then passed before feature work continued.
 
 ## Through R22
 
@@ -47,7 +49,18 @@ R20 acceptance: GitHub Actions run `34830427856` on `9cfd4dbf84b8587004e5df4437a
 
 R21 acceptance: GitHub Actions run `34831114522` on `511854de14693700b3cd595fcc8e259014fe7f2d`: PASS, 127 tests.
 
-R22 checkpoint: `0e6885a06c809617a62393b60329b1cc5f07ccb7`; its GitHub Actions run `34832267148` completed successfully before R23 implementation landed.
+R22 checkpoint: `0e6885a06c809617a62393b60329b1cc5f07ccb7`; GitHub Actions run `34832267148`: PASS.
+
+## Current product state
+
+The durable engine now has real provider boundaries for Codex writer and Claude reviewer plus a fail-closed external shadPS4/Bloodborne validation adapter. Local external execution remains the proven path. The next bounded unit is a deliberately minimal SSH transport for external tools; it must remain separable from orchestration semantics and must not grow into a distributed scheduler.
+
+Exact R24 recovery action:
+
+1. Read the SSH-related task/runner configuration and doctor behavior plus the external-tool supervision boundary.
+2. Define the smallest argv-safe SSH transport contract that preserves stdout/stderr/exit/timeout semantics without `shell=True` locally and without embedding orchestration state in the remote side.
+3. Add dedicated R24 tests using a fake `ssh` executable/process rather than requiring a network host; prove argv shape, host/user/base-dir handling, remote argument quoting, timeout/nonzero behavior and no accidental local shell interpretation.
+4. Run R24-specific tests and the full regression suite before marking R24 done.
 
 ## Durable decisions
 
@@ -65,6 +78,7 @@ R22 checkpoint: `0e6885a06c809617a62393b60329b1cc5f07ccb7`; its GitHub Actions r
 - Resource serialization and restart ownership are durable, never process-local assumptions.
 - Required deterministic scenarios are explicitly named; chaos adds reproducible variation and never replaces deterministic acceptance.
 - Bloodborne-specific behavior stays outside orchestration core.
+- Remote transport, when present, must remain a transport adapter rather than a second orchestrator.
 
 ## Handoff protocol
 

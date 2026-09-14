@@ -195,6 +195,14 @@ class ArtifactManager:
     ) -> AttemptRow:
         if not status.strip():
             raise ArtifactError("attempt status must not be empty")
+
+        # Operator cancellation is an independently durable terminal decision. A provider
+        # callback that races in afterwards must not create a new result artifact or replace
+        # the cancellation history with its own normalized outcome.
+        current = self.store.get_attempt(layout.attempt.attempt_id)
+        if current.ended_at is not None and current.status == "CANCELLED":
+            return current
+
         safe_result = redact(result)
         _write_json_exclusive(layout.result_path, safe_result)
         self.store.register_artifact(

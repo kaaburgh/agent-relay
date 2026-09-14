@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,6 +27,7 @@ class ShadPS4ValidationInvocation:
     layout: AttemptLayout
     run_id: str
     evidence_dir: Path
+    exit_checkpoint_path: Path
     process: Any
     generation: int
     candidate_sha: str
@@ -180,12 +182,25 @@ def _explicit_validation_failure(evidence_error: str) -> bool:
     return evidence_error.startswith("cycle ") and " reports failure status " in evidence_error
 
 
-class ShadPS4BloodborneValidator:
-    """External adapter for the existing Bloodborne/shadPS4 benchmark harness.
+def _load_exit_checkpoint(path: Path, run_id: str) -> tuple[int | None, str | None]:
+    if not path.exists():
+        return None, "process-exit.json is missing"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"process-exit.json is unreadable: {exc}"
+    if not isinstance(value, Mapping):
+        return None, "process-exit.json root must be an object"
+    if _string_field(value, "run_id", "runId") != run_id:
+        return None, "process-exit.json run_id mismatch"
+    status = _integer_field(value, "exit_status", "exitStatus", "returncode")
+    if status is None:
+        return None, "process-exit.json exit status is missing or invalid"
+    return status, None
 
-    It intentionally knows only the harness boundary: process argv plus machine-readable
-    evidence. Bloodborne menu/death/reload state remains owned by the external harness.
-    """
+
+class ShadPS4BloodborneValidator:
+    """External adapter for the existing Bloodborne/shadPS4 benchmark harness."""
 
     def __init__(
         self,
@@ -249,10 +264,22 @@ class ShadPS4BloodborneValidator:
             kind="rendered_command",
             path=str(rendered_path.relative_to(self.artifacts.root)),
         )
+        exit_checkpoint_path = layout.directory / "process-exit.json"
+        wrapper_argv = (
+            sys.executable,
+            "-m",
+            "agent_relay.exit_checkpoint_worker",
+            "--checkpoint",
+            str(exit_checkpoint_path),
+            "--run-id",
+            resolved_run_id,
+            "--",
+            *argv,
+        )
         process = await self.supervisor.start(
             task_id=task_id,
             attempt_id=layout.attempt.attempt_id,
-            argv=argv,
+            argv=wrapper_argv,
             cwd=Path(cwd),
             stdout_path=layout.stdout_path,
             stderr_path=layout.stderr_path,
@@ -265,6 +292,7 @@ class ShadPS4BloodborneValidator:
             layout=layout,
             run_id=resolved_run_id,
             evidence_dir=evidence_dir,
+            exit_checkpoint_path=exit_checkpoint_path,
             process=process,
             generation=generation,
             candidate_sha=candidate_sha,
@@ -295,17 +323,27 @@ class ShadPS4BloodborneValidator:
             ("summary", summary_path if summary_path.exists() else None),
         ):
             if path is not None:
-                self.store.register_artifact(
-                    task_id=invocation.layout.attempt.task_id,
-                    attempt_id=invocation.layout.attempt.attempt_id,
-                    kind=kind,
-                    path=str(path.relative_to(self.artifacts.root)),
-                    metadata={
-                        "run_id": invocation.run_id,
-                        "generation": invocation.generation,
-                        "candidate_sha": invocation.candidate_sha,
-                    },
-                )
+                existing = self.store._conn.execute(
+                    "SELECT 1 FROM artifacts WHERE task_id=? AND attempt_id=? AND kind=? AND path=?",
+                    (
+                        invocation.layout.attempt.task_id,
+                        invocation.layout.attempt.attempt_id,
+                        kind,
+                        str(path.relative_to(self.artifacts.root)),
+                    ),
+                ).fetchone()
+                if existing is None:
+                    self.store.register_artifact(
+                        task_id=invocation.layout.attempt.task_id,
+                        attempt_id=invocation.layout.attempt.attempt_id,
+                        kind=kind,
+                        path=str(path.relative_to(self.artifacts.root)),
+                        metadata={
+                            "run_id": invocation.run_id,
+                            "generation": invocation.generation,
+                            "candidate_sha": invocation.candidate_sha,
+                        },
+                    )
 
         if not status_path.exists():
             return 0, None, (), None, cycles_path, summary_path if summary_path.exists() else None, "runner-status.json is missing"
@@ -375,7 +413,28 @@ class ShadPS4BloodborneValidator:
             )
 
         completed, runner_state, records, status_path, cycles_path, summary_path, evidence_error = self._read_evidence(invocation)
-        if process_result.state not in {"SUCCEEDED", "FAILED"}:
+        checkpoint_status, checkpoint_error = _load_exit_checkpoint(
+            invocation.exit_checkpoint_path, invocation.run_id
+        )
+        if invocation.exit_checkpoint_path.exists():
+            relative = str(invocation.exit_checkpoint_path.relative_to(self.artifacts.root))
+            existing = self.store._conn.execute(
+                "SELECT 1 FROM artifacts WHERE task_id=? AND attempt_id=? AND kind='process_exit' AND path=?",
+                (invocation.layout.attempt.task_id, invocation.layout.attempt.attempt_id, relative),
+            ).fetchone()
+            if existing is None:
+                self.store.register_artifact(
+                    task_id=invocation.layout.attempt.task_id,
+                    attempt_id=invocation.layout.attempt.attempt_id,
+                    kind="process_exit",
+                    path=relative,
+                    metadata={"run_id": invocation.run_id},
+                )
+
+        if process_result.state == "FAILED" and process_result.returncode == 0:
+            kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
+            reason = "supervisor reported FAILED despite zero child exit"
+        elif process_result.state not in {"SUCCEEDED", "FAILED"}:
             kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
             reason = process_result.state
         elif process_result.returncode != 0:
@@ -388,6 +447,12 @@ class ShadPS4BloodborneValidator:
             else:
                 kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
                 reason = f"runner exit {process_result.returncode}; {evidence_error}"
+        elif checkpoint_error is not None:
+            kind = ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE
+            reason = checkpoint_error
+        elif checkpoint_status != 0:
+            kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
+            reason = f"process exit checkpoint reports {checkpoint_status}"
         elif evidence_error is not None:
             if _explicit_validation_failure(evidence_error):
                 kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
@@ -412,6 +477,7 @@ class ShadPS4BloodborneValidator:
                 "runner_status": str(status_path.relative_to(self.artifacts.root)) if status_path else None,
                 "cycles": str(cycles_path.relative_to(self.artifacts.root)) if cycles_path else None,
                 "summary": str(summary_path.relative_to(self.artifacts.root)) if summary_path else None,
+                "process_exit": str(invocation.exit_checkpoint_path.relative_to(self.artifacts.root)) if invocation.exit_checkpoint_path.exists() else None,
             },
             "reason": reason,
             "process": {

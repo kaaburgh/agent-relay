@@ -319,7 +319,11 @@ class CodexWriterProvider:
                 kind = CodexWriterResultKind.FAILURE
                 reason = str(exc)
             else:
-                kind = CodexWriterResultKind.SUCCESS
+                if candidate_sha is None:
+                    kind = CodexWriterResultKind.FAILURE
+                    reason = "Codex completed without a committed candidate"
+                else:
+                    kind = CodexWriterResultKind.SUCCESS
 
         normalized = {
             "kind": kind.value,

@@ -14,6 +14,14 @@ _SENSITIVE_KEY = re.compile(
     r"(?:password|passwd|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|access[_-]?key)",
     re.IGNORECASE,
 )
+_SAFE_USAGE_COUNTER_KEYS = {
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+}
 _INLINE_SECRET = re.compile(
     r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|access[_-]?key)=([^\s]+)"
 )
@@ -50,7 +58,11 @@ def _redact_string(value: str) -> str:
 
 def redact(value: Any, *, key: str | None = None) -> Any:
     """Return a JSON-compatible copy with obvious credentials removed."""
-    if key is not None and _SENSITIVE_KEY.search(key):
+    if (
+        key is not None
+        and key.lower() not in _SAFE_USAGE_COUNTER_KEYS
+        and _SENSITIVE_KEY.search(key)
+    ):
         return "<redacted>"
     if isinstance(value, Mapping):
         return {str(item_key): redact(item_value, key=str(item_key)) for item_key, item_value in value.items()}

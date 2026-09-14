@@ -10,37 +10,38 @@ Next bounded unit: `R26` — Final correctness/security review and required demo
 
 Acceptance pending: close the remaining adversarial findings, add the final review/connection documentation, then rerun the R26-specific acceptance, full regression suite, all twelve required deterministic scenarios and seeded >=100-workflow chaos demonstration before marking the project complete.
 
-## Latest R26 durable fact — process-group cancellation finding CLOSED
+## Latest R26 durable fact — stale lease reclaim TOCTOU CONFIRMED RED
 
-The operator orphan-cancellation defect is now closed. Production commit `cd28a8027da1c0b21fa46296995dbf1d7485e349` changed operator cleanup to make process-group existence authoritative instead of leader-PID liveness. It probes the PGID, sends SIGTERM even if the original leader has already exited while children remain, waits for live group members, and escalates the group to SIGKILL after grace. Linux `/proc` state is used to avoid treating zombie-only groups as live work.
+The stale-lease reclaim race is now demonstrated by executable evidence. Test commit `9f3a2fb28d99b77bcb25971d6c2b2b45cfdb3fd8` added `ResourceLeaseTests.test_stale_reclaim_rechecks_heartbeat_after_candidate_snapshot`.
 
-GitHub Actions run `34845859463` on `cd28a8027da1c0b21fa46296995dbf1d7485e349`: PASS, 162 tests in 43.969s on Python 3.12.14. The previously red `test_final_audit.FinalAuditProcessTests.test_operator_cancel_kills_group_even_after_leader_dies` passed, together with all twelve required deterministic scenarios and the seeded 100-workflow chaos sweep.
+GitHub Actions run `34846111400`: FAILED, 163 tests in 47.336s with exactly one failure, the new stale-reclaim test. The test takes a stale `active_leases()` candidate snapshot, then performs a real `heartbeat_lease()` database update to `2026-09-14T06:59:59+00:00` before reclaim proceeds at `07:00:00`. Current `reclaim_stale_leases()` still returned that lease as reclaimed with `released_at=07:00:00`, proving that the release decision uses stale heartbeat state and is not revalidated atomically.
 
-The red predecessor was run `34841585992` on `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`, where exactly that test failed because a SIGTERM-ignoring same-PGID child survived after leader exit. The red/green pair is now durable evidence for this finding.
+Observed invariant violation: a holder that refreshed its lease after the recovery snapshot but before the release transaction can lose the now-live lease. For a capacity-1 expensive runtime, this can make a second owner eligible while the original owner is active.
 
-## Next R26 finding — stale lease reclaim TOCTOU
+Exact next repair:
 
-The next material finding is `agent_relay/resource_leases.py::reclaim_stale_leases()`. Current code takes an `active_leases()` snapshot, decides a heartbeat is stale and checks for a RUNNING process, then later calls `release_lease()` in a separate transaction. A holder can refresh its heartbeat between the stale snapshot and the release transaction, yet the stale reclaim can still release the now-live lease.
+1. Keep the initial `active_leases()` enumeration as a cheap candidate scan.
+2. For each candidate, enter the SQLite write transaction and re-read the lease row by `lease_id`.
+3. Under that same transaction, verify it is still active, its current `heartbeat_at` is still <= the stale cutoff, it remains attempt-bound, and no durable `RUNNING` process exists for that attempt.
+4. Only then write `released_at` and the `resource_released` semantic event in that same transaction; do not call a separate later `release_lease()` transaction based on the stale snapshot.
+5. Run the same `test_stale_reclaim_rechecks_heartbeat_after_candidate_snapshot` green and checkpoint that result before further audit work.
+6. Run the full suite before opening another material finding.
 
-Exact next action, before any production fix:
+## Previous R26 durable fact — process-group cancellation CLOSED
 
-1. Add an adversarial lease test that injects a real `heartbeat_lease()` database update after `active_leases()` returns the stale snapshot but before reclaim releases it. The expected invariant is that a freshly heartbeated lease remains active and is not returned as reclaimed.
-2. Demonstrate that test red against the current implementation and checkpoint the exact run/result.
-3. Repair `reclaim_stale_leases()` so each candidate's current heartbeat, active ownership and absence of a durable RUNNING process are revalidated atomically under the SQLite write transaction immediately before the release/event write.
-4. Run the same targeted test green and checkpoint it before continuing the remaining audit.
-5. Then run the full suite before opening another material finding.
+Production commit `cd28a8027da1c0b21fa46296995dbf1d7485e349` made process-group existence authoritative instead of leader-PID liveness for operator cancellation. GitHub Actions run `34845859463`: PASS, 162 tests in 43.969s, including the previously red orphan-cancellation test, all twelve deterministic scenarios and the seeded 100-workflow chaos sweep.
+
+Its red predecessor was run `34841585992` on `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`, where a SIGTERM-ignoring same-PGID child survived after leader exit.
 
 ## R26 findings already closed
 
-- **Unbounded subprocess logs** — confirmed red, then fixed with bounded tail capture and continuous pipe draining so noisy children cannot fill a pipe or grow attempt logs without bound.
-- **External cancellation vs in-memory finalization race** — confirmed red, then fixed so `ManagedProcess.wait()` reconciles an already-durable terminal state instead of double-finalizing and raising `StoreError`.
+- **Unbounded subprocess logs** — confirmed red, then fixed with bounded tail capture and continuous pipe draining.
+- **External cancellation vs in-memory finalization race** — confirmed red, then fixed so `ManagedProcess.wait()` reconciles an already-durable terminal state.
 - **Late provider result after cancellation** — a durably cancelled attempt rejects late result finalization/history pollution.
-- **Normal parent exit with inherited child process** — fixed so parent completion does not leave an unmanaged same-group child alive; leader death is separated from pipe EOF and the remaining group is cleaned.
-- **Operator cancellation after leader exit** — red in `34841585992`, green in `34845859463`; surviving same-group children are now escalated independently of leader PID.
-- **Idempotent candidate freeze with stale writer ownership** — confirmed red and fixed at `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`; repeating the same candidate SHA is idempotent only when writer ownership and predecessor/current-generation provenance agree.
+- **Normal parent exit with inherited child process** — fixed so parent completion does not leave an unmanaged same-group child alive.
+- **Operator cancellation after leader exit** — red in `34841585992`, green in `34845859463`.
+- **Idempotent candidate freeze with stale writer ownership** — confirmed red and fixed at `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`.
 - **Unsafe local shell/destructive Git cleanup** — source audit test confirms no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
-
-A previous green checkpoint for the first group of fixes was GitHub Actions run `34841275810` on `b08f7bf1...`: 160 tests PASS.
 
 ## Remaining R26 audit scope
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
@@ -40,6 +41,7 @@ class ManagedProcess:
         stdout_file: TextIO,
         stderr_file: TextIO,
         started_at: str,
+        started_monotonic: float,
         timeout_seconds: float | None,
         terminate_grace_seconds: float,
         heartbeat_interval: float,
@@ -51,6 +53,7 @@ class ManagedProcess:
         self.stdout_file = stdout_file
         self.stderr_file = stderr_file
         self.started_at = started_at
+        self.started_monotonic = started_monotonic
         self.timeout_seconds = timeout_seconds
         self.terminate_grace_seconds = terminate_grace_seconds
         self.heartbeat_interval = heartbeat_interval
@@ -60,6 +63,12 @@ class ManagedProcess:
     @property
     def pid(self) -> int:
         return int(self.process.pid)
+
+    @property
+    def timeout_deadline(self) -> float | None:
+        if self.timeout_seconds is None:
+            return None
+        return self.started_monotonic + self.timeout_seconds
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -136,16 +145,25 @@ class ManagedProcess:
             stalled=stalled,
         )
 
+    async def expire_timeout(self) -> ProcessResult:
+        if self.timeout_seconds is None:
+            raise SupervisorError("cannot expire timeout for a process without a timeout")
+        forced = await self._terminate_group()
+        return await self._finish("TIMED_OUT", timed_out=True, forced_kill=forced)
+
     async def wait(self) -> ProcessResult:
         try:
-            if self.timeout_seconds is None:
+            deadline = self.timeout_deadline
+            if deadline is None:
                 await self.process.wait()
             else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return await self.expire_timeout()
                 try:
-                    await asyncio.wait_for(self.process.wait(), timeout=self.timeout_seconds)
+                    await asyncio.wait_for(self.process.wait(), timeout=remaining)
                 except asyncio.TimeoutError:
-                    forced = await self._terminate_group()
-                    return await self._finish("TIMED_OUT", timed_out=True, forced_kill=forced)
+                    return await self.expire_timeout()
         except asyncio.CancelledError:
             forced = await self._terminate_group()
             await self._finish("CANCELLED", timed_out=False, forced_kill=forced)
@@ -217,6 +235,7 @@ class SubprocessSupervisor:
             stdout_file.close()
             stderr_file.close()
             raise
+        started_monotonic = time.monotonic()
         process_group_id = int(process.pid)
         safe_command = redact(list(argv))
         try:
@@ -273,6 +292,7 @@ class SubprocessSupervisor:
             stdout_file=stdout_file,
             stderr_file=stderr_file,
             started_at=started_at,
+            started_monotonic=started_monotonic,
             timeout_seconds=timeout_seconds,
             terminate_grace_seconds=terminate_grace_seconds,
             heartbeat_interval=heartbeat_interval,

@@ -78,7 +78,7 @@ Current SSH limitations are deliberate:
 
 - command stdin is unavailable because stdin transports the launch script;
 - no rsync/SCP/artifact-transfer protocol is implemented;
-- remote validation evidence must be on storage visible to the local orchestrator, or an explicit transfer layer must run before local evidence parsing;
+- remote validation evidence must be on shared storage visible to the local orchestrator, or an explicit transfer layer must run before local evidence parsing;
 - timeout/cancel supervises the local SSH process group; arbitrary remote processes that deliberately daemonize/detach are not guaranteed to die when the connection is terminated;
 - there is no remote agent-relay state machine or distributed scheduler.
 

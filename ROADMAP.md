@@ -42,10 +42,10 @@ Depends on R03,R07,R08,R09. Deterministic orchestration now composes a real simu
 ## R11 — REQUEST_CHANGES/rework generations — DONE
 Depends on R10. A valid generation-1 `REQUEST_CHANGES` is persisted immutably, its structured findings are copied into the immutable inputs of a fresh rework writer attempt, and the writer makes a distinct generation-2 commit. Generation 2 is independently validated and reviewed from a new detached reviewer worktree/invocation before approval. Historical generation-1 validation/review rows remain queryable and DB-level append-only guards reject UPDATE/DELETE.
 
-## R12 — Provider-unavailable wait/retry — READY
-Depends on R10. Durable `WAITING_PROVIDER` metadata and bounded/exponential retry without busy-spin; resume same workflow/candidate state.
+## R12 — Provider-unavailable wait/retry — DONE
+Depends on R10. Provider unavailability is committed atomically as `WAITING_PROVIDER` plus durable wait metadata and semantic `provider_unavailable`/`retry_scheduled` events. Exponential retry is bounded, not polled by busy-spin, survives SQLite reopen, resumes the exact interrupted active stage only when due, preserves attempt count across repeated failures, and clears current wait metadata only after provider success while preserving event history.
 
-## R13 — Generic persisted resource leases — FUTURE
+## R13 — Generic persisted resource leases — READY
 Depends on R02,R09. Capacity-based named leases; two capacity-1 runtime users cannot overlap; unrelated stages may proceed; recovery is safe.
 
 ## R14 — Writer restart recovery — FUTURE

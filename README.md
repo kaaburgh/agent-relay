@@ -88,6 +88,7 @@ agent-relay events TASK_ID --config examples/config.simulated.yaml
 - [Product/acceptance contract](docs/spec.md)
 - [Roadmap](ROADMAP.md)
 - [Current durable handoff](docs/implementation-status.md)
+- [Final R26 review](docs/final-review.md)
 
 ## Safety model
 

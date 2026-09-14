@@ -45,10 +45,10 @@ Depends on R10. A valid generation-1 `REQUEST_CHANGES` is persisted immutably, i
 ## R12 — Provider-unavailable wait/retry — DONE
 Depends on R10. Provider unavailability is committed atomically as `WAITING_PROVIDER` plus durable wait metadata and semantic `provider_unavailable`/`retry_scheduled` events. Exponential retry is bounded, not polled by busy-spin, survives SQLite reopen, resumes the exact interrupted active stage only when due, preserves attempt count across repeated failures, and clears current wait metadata only after provider success while preserving event history.
 
-## R13 — Generic persisted resource leases — READY
-Depends on R02,R09. Capacity-based named leases; two capacity-1 runtime users cannot overlap; unrelated stages may proceed; recovery is safe.
+## R13 — Generic persisted resource leases — DONE
+Depends on R02,R09. Named resources have durable positive capacity and leases are acquired under `BEGIN IMMEDIATE`, making capacity checks atomic. Same-holder acquire is idempotent while active, release is ownership-checked, heartbeat does not emit event spam, and capacity-1/capacity-N behavior is tested. Independent resources do not serialize each other. Active leases survive database reopen; stale recovery only reclaims attempt-bound leases with stale heartbeat and no durable RUNNING process, tested against a real subprocess. Acquire/release emit semantic resource events.
 
-## R14 — Writer restart recovery — FUTURE
+## R14 — Writer restart recovery — READY
 Depends on R07,R10. Real separately running fake worker plus orchestrator termination/restart; reconcile commit/result/process evidence and never duplicate completed writer work.
 
 ## R15 — External-validation restart recovery — FUTURE

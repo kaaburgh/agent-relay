@@ -2,51 +2,52 @@
 
 ## Current checkpoint
 
-Completed: `R00`–`R21`.
+Completed: `R00`–`R22`.
 
-Next bounded unit: `R22 — Real Claude reviewer adapter/package`.
+In progress: `R23`.
 
-## Through R19
+Next bounded unit: `R23 — Real shadPS4/Bloodborne tool adapter`.
 
-Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision/watchdog cleanup, simulated providers/tools, bounded review/rework, provider retry, persisted resource leases, restart recovery, fail-closed guardrails, the explicit twelve-scenario deterministic integration matrix, and the seeded 100-workflow chaos/invariant sweep are implemented with real temporary Git/SQLite/subprocess semantics.
+Acceptance pending: dedicated R23 acceptance coverage for the external shadPS4/Bloodborne adapter. The production adapter is present at HEAD, and the full pre-existing regression suite is green, but R23 is **not** complete until its own success/failure/evidence cases are directly exercised.
 
-## R20 evidence — operator CLI and doctor
+## Durable recovery point
 
-Implemented `agent_relay/operator.py`, `agent_relay/execution.py`, and completed `agent_relay/cli.py`; expanded `tests/test_cli.py`.
+Current WIP implementation commit: `5e6365c6030b5c3873231546275e8e4510b983f9` (`R23: add external shadPS4 Bloodborne validation adapter`).
 
-Operator guarantees:
+The commit adds `agent_relay/shadps4_validator.py` with an external-config boundary around the existing harness. It renders only allowed placeholders, supervises the external process, optionally applies the evidence-progress watchdog, reads `runner-status.json`, `cycles.csv`/`cycles.json`, and `summary.md`, validates run ID/requested/completed cycles and cycle statuses, and classifies success/failure/incomplete evidence/process failure. Bloodborne menu/death/reload behavior remains outside core orchestration.
 
-- `task create` validates and persists both the SQLite task row and a durable human-readable task snapshot;
-- `status` reports workflow stage/attempt, current generation/SHA, live managed processes, last semantic event, current review/validation, provider wait/retry metadata and held leases;
-- `events` reads append-only semantic history with an optional tail limit;
-- `resume` resumes a due `WAITING_PROVIDER` retry but refuses to blindly duplicate ambiguous active-stage ownership;
-- `cancel` terminates active managed process groups before committing durable `CANCELLED` state;
-- `doctor` checks Python/Git/SQLite writability, configured provider executables/auth probes where configured, local/SSH runner prerequisites, resources and optional repository/baseline readiness without printing credentials;
-- `run --simulation` executes the real simulated writer -> validator -> independent reviewer pipeline through `DONE`;
-- ordinary `run` is deliberately fail-closed before a real configured execution backend is installed and leaves a `READY` task unmodified.
+GitHub Actions run `34832377976` on `5e6365c6030b5c3873231546275e8e4510b983f9`: PASS, 134 tests in 41.974s on Python 3.12.14. This proves no observed regression in the existing suite; it is deliberately **not** accepted as R23 completion evidence because there was no R23-specific test module in that run.
 
-First R20 acceptance had one test-only validation-order assertion failure (120/121 tests passed); no production change was needed. The assertion was made order-independent. GitHub Actions run `34830427856` on `9cfd4dbf84b8587004e5df4437a9ae18c638730c`: PASS, 121 tests.
+Exact recovery action:
 
-## R21 evidence — Codex writer adapter
+1. Review `agent_relay/shadps4_validator.py` against R23/spec acceptance requirements.
+2. Add `tests/test_shadps4_validator.py` using a real fake external harness subprocess.
+3. Cover at minimum: successful N/N evidence, exit-zero incomplete evidence, runner/cycle failure, run-ID/request-count mismatch, CSV and JSON cycle evidence, process crash/nonzero, timeout/stall cleanup, placeholder validation, and durable artifact/attempt provenance.
+4. Run the R23-specific tests, then `python -m unittest discover -s tests -v`.
+5. Only after both are green, atomically mark R23 `DONE`, set R24 `READY`, update this file with exact evidence, and continue automatically.
 
-Implemented `agent_relay/codex_writer.py`; extended `agent_relay/supervisor.py` with bounded subprocess stdin delivery; added `tests/test_codex_writer.py`; refined artifact credential redaction so known numeric token-usage counters remain observable while credential-shaped token keys remain redacted.
+## Protocol repair after the R23 partial-stop incident
 
-Codex adapter guarantees:
+The previous handoff could drift because HEAD contained R23 production code, `ROADMAP.md` still said R23 `READY`, `docs/implementation-status.md` was stale at R21/R22, and the general regression CI remained green. That state is no longer considered acceptable.
 
-- current non-interactive CLI syntax is isolated in the adapter (`codex exec`, JSONL output, model, reasoning effort, sandbox, approval policy, working directory and optional network/ephemeral settings);
-- the task prompt is delivered over stdin and is not persisted in process argv/command metadata;
-- stdout JSONL parsing requires a `thread.started` session ID and a terminal turn, captures the last completed `agent_message` as handoff, aggregates exposed usage counters and preserves stream errors;
-- obvious rate-limit/quota/temporary-unavailability output is normalized separately from generic process failure;
-- timeout remains a managed-process failure with process-group cleanup;
-- exit zero, valid JSONL and a handoff are still insufficient for success: the writer worktree must contain a clean committed descendant of the exact frozen baseline;
-- exit-zero/no-commit and malformed streams fail closed;
-- attempts preserve command/PID/timestamps/exit/stdout/stderr/thread ID/handoff/usage/candidate evidence.
+Protocol changes now required by `AGENTS.md`:
 
-The first R21 acceptance exposed two product issues: token usage counters were over-redacted because their field names contain `token`, and valid exit-zero JSONL with no candidate was mistakenly accepted after `detect_candidate()` returned `None`. Both are now regression-covered. GitHub Actions run `34831114522` on `511854de14693700b3cd595fcc8e259014fe7f2d`: PASS, 127 tests in 39.461s on Python 3.12.14.
+- a new unit moves to `IN PROGRESS` before/with partial implementation landing;
+- a full regression suite does not prove a unit complete without unit-specific acceptance coverage;
+- partial/WIP commits must durably record missing acceptance and exact recovery action;
+- roadmap/status transitions should use one atomic Git tree commit when possible;
+- every tool/session closeout runs an explicit acceptance/status/recovery checklist;
+- `tests/test_project_status.py` machine-checks agreement between roadmap and implementation status so metadata drift makes CI red.
 
-## Current product state
+## Through R22
 
-The durable engine is operator-usable with a real simulation backend, and the first authenticated real-provider boundary (Codex writer) now has a source-verified CLI adapter and deterministic CLI-compatible acceptance coverage. Real end-to-end provider execution remains intentionally incomplete until the independent Claude reviewer adapter is added; the next unit is R22.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision/watchdog cleanup, simulated providers/tools, bounded review/rework, provider retry, persisted resource leases, restart recovery, fail-closed guardrails, the explicit twelve-scenario deterministic integration matrix, the seeded 100-workflow chaos/invariant sweep, operator CLI/doctor, the real Codex writer adapter, and the independent Claude reviewer adapter are implemented and acceptance-tested.
+
+R20 acceptance: GitHub Actions run `34830427856` on `9cfd4dbf84b8587004e5df4437a9ae18c638730c`: PASS, 121 tests.
+
+R21 acceptance: GitHub Actions run `34831114522` on `511854de14693700b3cd595fcc8e259014fe7f2d`: PASS, 127 tests.
+
+R22 checkpoint: `0e6885a06c809617a62393b60329b1cc5f07ccb7`; its GitHub Actions run `34832267148` completed successfully before R23 implementation landed.
 
 ## Durable decisions
 
@@ -67,4 +68,4 @@ The durable engine is operator-usable with a real simulation backend, and the fi
 
 ## Handoff protocol
 
-At every roadmap checkpoint, record completed/in-progress unit, exact commands/results, important files/modules, material decisions, unresolved limitations and exact next `READY` unit. Preserve useful history and never mark an acceptance gate complete without evidence.
+At every roadmap checkpoint, record completed/in-progress unit, exact commands/results, important files/modules, material decisions, unresolved limitations, missing acceptance, and exact next recovery action. Preserve useful history and never mark an acceptance gate complete without direct evidence.

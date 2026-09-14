@@ -10,10 +10,10 @@ Read before implementation work:
 
 1. `docs/spec.md` — product/acceptance contract; never silently weaken it.
 2. `ROADMAP.md` — ordered durable implementation units and acceptance gates.
-3. `docs/implementation-status.md` — current durable handoff, completed work, known failures, and next unit.
+3. `docs/implementation-status.md` — current durable handoff, completed work, known failures, in-progress work, and exact recovery action.
 4. Existing code/tests/evidence — authoritative for what is actually implemented.
 
-If roadmap wording conflicts with the specification, preserve the specification and repair roadmap/status.
+If roadmap wording conflicts with the specification, preserve the specification and repair roadmap/status. If roadmap/status disagree with code or CI evidence, fail closed: mark the unit `IN PROGRESS`, repair the durable handoff, and do not infer completion from a green regression suite.
 
 ## Durable-unit protocol
 
@@ -21,13 +21,38 @@ A roadmap unit is a durable implementation checkpoint, not necessarily a ChatGPT
 
 Unless the user explicitly requests a single-unit bounded pass:
 
-1. Recover repository state and select the first `READY` roadmap unit whose dependencies are `DONE`.
-2. Implement only that unit plus minimum prerequisite repair required for correctness.
-3. Run its acceptance gate and relevant regression tests.
-4. Update `docs/implementation-status.md` with exact commands/results, decisions, failures, and next unit.
-5. Mark the unit `DONE` and the next eligible unit `READY` only when acceptance is demonstrated.
-6. Create a durable Git checkpoint/commit when permissions allow.
-7. Recover from the new HEAD and continue automatically with the next `READY` unit.
+1. Recover repository state and select the current `IN PROGRESS` unit, otherwise the first `READY` roadmap unit whose dependencies are `DONE`.
+2. Before landing implementation for a new unit, move that unit from `READY` to `IN PROGRESS` in the durable status. Prefer an atomic multi-file commit/tree for status transitions plus related protocol metadata.
+3. Implement only that unit plus minimum prerequisite repair required for correctness.
+4. Add or update **unit-specific acceptance tests** that directly exercise the new behavior. A green full regression suite is necessary but is not sufficient evidence for a new unit when no test specifically covers that unit.
+5. Run the unit-specific acceptance gate and the relevant/full regression suite.
+6. Update `docs/implementation-status.md` with exact commands/results, decisions, failures, partial work, and the exact next recovery action.
+7. Mark the unit `DONE` and the next eligible unit `READY` only when its own acceptance is demonstrated. Never mark a unit done merely because unrelated/regression tests are green.
+8. Create a durable Git checkpoint/commit when permissions allow.
+9. Recover from the new HEAD and continue automatically with the next `READY` unit.
+
+### Partial-work rule
+
+If implementation must be committed before acceptance is complete, the commit is a WIP checkpoint, not a completed unit. In the same durable checkpoint (preferably one atomic Git tree commit):
+
+- roadmap status is `IN PROGRESS`;
+- implementation status names the partial files/behavior already landed;
+- missing acceptance is explicit;
+- the exact recovery action is recorded.
+
+Do not leave `ROADMAP.md`, `docs/implementation-status.md`, HEAD implementation, and CI evidence describing different units. `tests/test_project_status.py` is a CI guard for this metadata contract and must remain green.
+
+### Closeout checklist
+
+Before ending a tool-execution window, turn, or long work session, run this checklist even if the current unit is incomplete:
+
+- Is the unit-specific acceptance test present and has it run?
+- Has the full/relevant regression suite run after the latest production change?
+- Do `ROADMAP.md` and `docs/implementation-status.md` agree on completed, in-progress, and next unit?
+- Does HEAD clearly represent either a completed checkpoint or a documented WIP checkpoint?
+- Is the exact next recovery action durable in `docs/implementation-status.md`?
+
+If any answer is no and tools still work, repair the durable checkpoint before doing more feature work. If tools become objectively unavailable, report the missing closeout item explicitly; do not claim the unit is complete.
 
 Stop only on Definition of Done, a genuine external blocker, an unsatisfied acceptance gate after reasonable diagnosis, a safety/permission boundary, or objective tool/environment impossibility. A successful unit or commit is not itself a reason to stop.
 

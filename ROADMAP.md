@@ -2,9 +2,9 @@
 
 This roadmap decomposes `docs/spec.md` into durable implementation units. It is not an issue tracker. Each unit is a checkpoint/transaction; unless a single-unit pass is explicitly requested, a successful checkpoint is followed automatically by the next `READY` unit.
 
-Status legend: `DONE`, `READY`, `BLOCKED`, `FUTURE`.
+Status legend: `DONE`, `READY`, `IN PROGRESS`, `BLOCKED`, `FUTURE`.
 
-Selection rule: take the first `READY` item whose dependencies are `DONE`. Every unit remains subject to the complete product/acceptance contract in `docs/spec.md`; this file must not be used to weaken it.
+Selection rule: continue the single `IN PROGRESS` item if one exists; otherwise take the first `READY` item whose dependencies are `DONE`. Every unit remains subject to the complete product/acceptance contract in `docs/spec.md`; this file must not be used to weaken it. A unit may be `IN PROGRESS` when implementation has landed but its own acceptance gate is not yet demonstrated.
 
 ## R00 — Agent-friendly repository scaffold — DONE
 Python 3.12 package shell, CI/test shell, durable spec, roadmap, handoff and agent instructions.
@@ -75,8 +75,8 @@ Depends on R18,R20. The authenticated local Codex CLI is isolated behind a write
 ## R22 — Real Claude reviewer adapter/package — DONE
 Depends on R18,R20. A fresh Claude Code process reviews a dedicated detached worktree at the exact candidate SHA using non-interactive JSON output, a strict JSON schema, `plan` permission mode, read-only tool allowlist, no session persistence and bare startup. The bounded review package contains task/acceptance criteria, frozen baseline/candidate, changed paths plus bounded diff, deterministic evidence/commands and explicitly labeled untrusted writer claims; it exposes no writer private reasoning/history. The adapter captures session/usage/output, validates the structured review again in core, classifies provider unavailability, and rejects any review that changes HEAD or worktree status. CLI-compatible fake tests cover approve, request-changes, malformed/unavailable output, package bounds, wrong SHA/write-tool rejection and malicious reviewer writes.
 
-## R23 — Real shadPS4/Bloodborne tool adapter — READY
-Depends on R18,R20. External-config adapter for existing harness; normalize run ID, requested/completed cycles, exit, runner status, cycle data and summary/evidence without copying harness FSM into core.
+## R23 — Real shadPS4/Bloodborne tool adapter — IN PROGRESS
+Depends on R18,R20. External-config adapter for existing harness; normalize run ID, requested/completed cycles, exit, runner status, cycle data and summary/evidence without copying harness FSM into core. Production adapter code has landed, but the unit remains incomplete until dedicated R23 acceptance tests cover success and fail-closed evidence/process cases.
 
 ## R24 — Minimal SSH external-tool runner — FUTURE
 Depends on R23. Keep local/remote execution separable; implement minimal safe SSH argv runner only if it does not destabilize core. No distributed scheduler.

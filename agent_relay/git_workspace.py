@@ -162,19 +162,41 @@ def record_candidate_generation(
         raise StoreError(f"invalid candidate SHA: {candidate_sha!r}")
     now = utc_now()
     with store._transaction():
+        task = store._conn.execute(
+            "SELECT stage,current_generation,current_candidate_sha FROM tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if task is None:
+            raise TaskNotFound(task_id)
+        current_generation = int(task["current_generation"])
+
         existing = store._conn.execute(
             "SELECT * FROM candidate_generations WHERE task_id=? AND candidate_sha=?",
             (task_id, candidate_sha),
         ).fetchone()
         if existing is not None:
-            return _candidate_row(existing)
+            frozen = _candidate_row(existing)
+            if writer_attempt_id is not None and frozen.writer_attempt_id != writer_attempt_id:
+                raise StoreError(
+                    "idempotent candidate freeze writer attempt does not match durable ownership"
+                )
+            if (
+                expected_previous_generation is not None
+                and frozen.generation != expected_previous_generation + 1
+            ):
+                raise StoreError(
+                    f"stale candidate generation: expected predecessor {expected_previous_generation}, "
+                    f"candidate is generation {frozen.generation}"
+                )
+            if (
+                current_generation != frozen.generation
+                or task["current_candidate_sha"] != candidate_sha
+            ):
+                raise StoreError(
+                    "idempotent candidate freeze refers to a stale non-current candidate"
+                )
+            return frozen
 
-        task = store._conn.execute(
-            "SELECT stage, current_generation FROM tasks WHERE task_id=?", (task_id,)
-        ).fetchone()
-        if task is None:
-            raise TaskNotFound(task_id)
-        current_generation = int(task["current_generation"])
         if expected_previous_generation is not None and current_generation != expected_previous_generation:
             raise StoreError(
                 f"stale candidate generation: expected {expected_previous_generation}, found {current_generation}"

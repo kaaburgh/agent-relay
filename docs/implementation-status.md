@@ -2,31 +2,30 @@
 
 ## Current checkpoint
 
-Completed: `R00`–`R25`.
+Completed: `R00`–`R26`.
 
-In progress: `R26`.
+In progress: none.
 
-Next bounded unit: `R26` — Final correctness/security review and required demonstration.
+Next bounded unit: none — roadmap complete.
 
-Acceptance pending: the final production/documentation gate is green. The only remaining work is an atomic roadmap/handoff closeout marking R26 DONE, followed by a metadata-consistency CI verification.
+Acceptance pending: none for the implemented roadmap. R26 and the complete R00–R26 roadmap are accepted by the product/documentation gate below. Ordinary top-level real-provider `agent-relay run` remains an explicitly documented limitation/future composition concern, not an unreported acceptance gap.
 
-## Latest R26 durable fact — FINAL PRODUCT + DOCUMENTATION GATE GREEN
+## Final accepted product/documentation gate
 
 Accepted HEAD `a9668502dda6f1f2094dd3b13bb8620de3c020f1`, GitHub Actions run `34858958981`: PASS, 169 tests in 44.090s.
 
 This gate includes `docs/final-review.md`, its executable documentation acceptance tests and the README link. Both `FinalReviewDocumentationTests` passed, proving the final review continues to disclose the intentionally fail-closed ordinary real `agent-relay run` boundary, maps all twelve required deterministic demonstrations plus the seeded chaos sweep, and documents exact safe connection steps/boundaries for Codex, Claude, local shadPS4 and SSH-transported shadPS4.
 
-The same run passed the complete suite, including:
+The same accepted run passed:
 
-- all R26 adversarial regressions: process-group/cancellation races, lease reclaim TOCTOU, result publication/crash residue, missing per-cycle success evidence and CSV/JSON recovery;
+- the complete automated suite;
+- every R26 adversarial regression, including process-group/cancellation races, lease reclaim TOCTOU, result publication/crash residue, missing per-cycle success evidence and CSV/JSON recovery;
 - all twelve `RequiredIntegrationScenarios` (`s01`–`s12`);
 - `ChaosIntegrationTests.test_reproducible_100_workflow_chaos_sweep`: exactly 100 workflows with seed `20260914`;
-- all real-adapter contract tests for Codex, Claude, shadPS4 and SSH;
-- project-status protocol consistency tests.
+- real-adapter contract tests for Codex, Claude, shadPS4 and SSH;
+- project-status development-protocol consistency tests.
 
-No material production-code finding remains open. `docs/final-review.md` is the completed Definition-of-Done handoff for the implemented scope and states the known limitation precisely: real adapters are individually implemented/tested, while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than presenting a fake integrated real-provider composition.
-
-Exact next action: atomically change `ROADMAP.md` R26 from `IN PROGRESS` to `DONE` and this handoff to Completed `R00`–`R26` with no current bounded unit, without changing production code. Then require the metadata-only closeout HEAD to pass CI/project-status consistency before declaring the roadmap complete.
+`docs/final-review.md` is the completed Definition-of-Done handoff for the implemented scope: repository/architecture, state machine, persistent schema, provider interfaces/status, simulations, leases, recovery, required demonstration mapping/results, chaos seed/count, known limitations and exact next connection steps for authenticated Codex/Luna, authenticated Claude/Opus and local/remote shadPS4/Bloodborne.
 
 ## R26 findings closed by the adversarial audit
 
@@ -42,9 +41,17 @@ Exact next action: atomically change `ROADMAP.md` R26 from `IN PROGRESS` to `DON
 - CSV/JSON validation recovery mismatch — red `34858018738`, green `34858291629`;
 - unsafe local shell/destructive Git cleanup — no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
 
+## Known implemented-scope limitation
+
+Real Codex, Claude, shadPS4 and SSH adapters are individually implemented and tested. `run --simulation` is the complete operator-ready end-to-end path. Ordinary top-level `agent-relay run` without `--simulation` intentionally fails closed rather than pretending an integrated real Codex -> validation -> Claude operator composition exists. Exact component connection steps and SSH/shared-evidence boundaries are recorded in `docs/final-review.md`.
+
+## Closeout verification
+
+This handoff and `ROADMAP.md` are changed atomically to mark R26 DONE. The resulting metadata-only closeout HEAD must pass CI/project-status consistency; that CI is a verification of the already accepted product/documentation gate above and does not reopen production scope.
+
 ## Development protocol guard
 
-Protocol strengthened at `8ed9bf27f456301eee9da2f440e3ab1cf4697807`: every materially new CI fact is checkpointed before the next material fix, red results are durable before repair, and R26 uses targeted red -> checkpoint -> fix -> targeted green -> checkpoint -> full-suite progression.
+Protocol strengthened at `8ed9bf27f456301eee9da2f440e3ab1cf4697807`: every materially new CI fact is checkpointed before the next material fix, red results are durable before repair, and R26 used targeted red -> checkpoint -> fix -> targeted green -> checkpoint -> full-suite progression.
 
 ## Handoff protocol
 

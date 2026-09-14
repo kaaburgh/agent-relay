@@ -5,12 +5,16 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
 from agent_relay.artifacts import ArtifactManager
 from agent_relay.git_workspace import GitWorkspaceManager, candidate_generations
+from agent_relay.runtime_safety import (
+    capture_process_identity,
+    ensure_runtime_safety_guards,
+    persist_process_identity,
+)
 from agent_relay.store import Store, utc_now
 from agent_relay.workflow import WorkflowStage, WorkflowStateMachine
 from agent_relay.writer_recovery import reconcile_writer_attempt
@@ -29,6 +33,7 @@ class WriterRecoveryTests(unittest.TestCase):
         self._git(self.repo, "commit", "-m", "baseline")
         self.db = self.root / "state.sqlite3"
         self.store = Store(self.db)
+        ensure_runtime_safety_guards(self.store)
         self.store.create_task(
             task_id="task-1",
             repository=str(self.repo),
@@ -52,6 +57,37 @@ class WriterRecoveryTests(unittest.TestCase):
     @staticmethod
     def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+    def _record_detached_process(self, *, attempt_id: int, process: subprocess.Popen[bytes]) -> None:
+        launched = utc_now()
+        identity = capture_process_identity(process.pid)
+        with self.store._transaction():
+            cursor = self.store._conn.execute(
+                """
+                INSERT INTO processes(
+                    task_id,attempt_id,pid,process_group_id,state,command_json,
+                    started_at,last_liveness_at
+                ) VALUES (?,?,?,?, 'RUNNING', ?, ?, ?)
+                """,
+                (
+                    "task-1",
+                    attempt_id,
+                    process.pid,
+                    os.getpgid(process.pid),
+                    json.dumps(["simulated-writer-detached"]),
+                    launched,
+                    launched,
+                ),
+            )
+            persist_process_identity(
+                self.store,
+                process_id=int(cursor.lastrowid),
+                identity=identity,
+            )
+            self.store._conn.execute(
+                "UPDATE attempts SET pid=?,status='RUNNING' WHERE attempt_id=?",
+                (process.pid, attempt_id),
+            )
 
     def test_separate_worker_finishes_after_store_closes_and_new_store_recovers_once(self) -> None:
         behavior = [
@@ -90,25 +126,7 @@ class WriterRecoveryTests(unittest.TestCase):
         )
         out.close()
         err.close()
-        launched = utc_now()
-        with self.store._transaction():
-            self.store._conn.execute(
-                """
-                INSERT INTO processes(
-                    task_id,attempt_id,pid,process_group_id,state,command_json,
-                    started_at,last_liveness_at
-                ) VALUES (?,?,?,?, 'RUNNING', ?, ?, ?)
-                """,
-                (
-                    "task-1",
-                    layout.attempt.attempt_id,
-                    process.pid,
-                    os.getpgid(process.pid),
-                    json.dumps(["simulated-writer-detached"]),
-                    launched,
-                    launched,
-                ),
-            )
+        self._record_detached_process(attempt_id=layout.attempt.attempt_id, process=process)
 
         while_live = reconcile_writer_attempt(
             self.store,
@@ -121,6 +139,7 @@ class WriterRecoveryTests(unittest.TestCase):
             expected_previous_generation=0,
         )
         self.assertEqual(while_live.action, "RUNNING")
+        self.assertEqual(self.store.get_attempt(layout.attempt.attempt_id).status, "RUNNING")
         self.assertEqual(len(self.store.attempts("task-1", "writer")), 1)
 
         self.store.close()
@@ -148,6 +167,8 @@ class WriterRecoveryTests(unittest.TestCase):
         self.assertEqual(len(candidate_generations(self.store, "task-1")), 1)
         attempt = self.store.get_attempt(layout.attempt.attempt_id)
         self.assertEqual(attempt.status, "SUCCESS")
+        self.assertIsNotNone(attempt.ended_at)
+        self.assertTrue(layout.result_path.exists())
         process_row = self.store._conn.execute(
             "SELECT state,exit_status FROM processes WHERE attempt_id=?",
             (layout.attempt.attempt_id,),

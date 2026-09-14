@@ -302,10 +302,45 @@ def resume_task(store: Store, task_id: str) -> dict[str, Any]:
     }
 
 
+def _process_group_alive(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    observed_member = False
+    try:
+        entries = tuple(proc.iterdir())
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="utf-8")
+            close_paren = raw.rfind(")")
+            if close_paren < 0:
+                continue
+            fields = raw[close_paren + 2 :].split()
+            if len(fields) < 3 or int(fields[2]) != group:
+                continue
+            observed_member = True
+            if fields[0] != "Z":
+                return True
+        except (OSError, ValueError):
+            continue
+    return not observed_member
+
+
 def _terminate_process_group(pid: int, pgid: int | None, grace_seconds: float) -> tuple[bool, bool]:
-    if not _pid_alive(pid):
-        return False, False
     group = int(pgid or pid)
+    if not _process_group_alive(group):
+        return False, False
     sent_term = False
     sent_kill = False
     try:
@@ -315,10 +350,10 @@ def _terminate_process_group(pid: int, pgid: int | None, grace_seconds: float) -
         return False, False
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not _process_group_alive(group):
             return sent_term, sent_kill
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
-    if _pid_alive(pid):
+    if _process_group_alive(group):
         try:
             os.killpg(group, signal.SIGKILL)
             sent_kill = True

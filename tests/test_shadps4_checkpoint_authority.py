@@ -167,7 +167,7 @@ class ShadPS4CheckpointAuthorityTests(unittest.TestCase):
                 INSERT INTO processes(
                     task_id,attempt_id,pid,process_group_id,state,command_json,
                     started_at,ended_at,exit_status,last_liveness_at
-                ) VALUES (?,?,?,?, 'FAILED','[]',?,?,?,?,?)
+                ) VALUES (?,?,?,?, 'FAILED','[]',?,?,?,?)
                 """,
                 (
                     "task-1",

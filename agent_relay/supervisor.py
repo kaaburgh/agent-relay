@@ -197,12 +197,15 @@ class SubprocessSupervisor:
         stderr_path: str | Path,
         attempt_id: int | None = None,
         env_additions: Mapping[str, str] | None = None,
+        stdin_text: str | None = None,
         timeout_seconds: float | None = None,
         terminate_grace_seconds: float = 5.0,
         heartbeat_interval: float = 30.0,
     ) -> ManagedProcess:
         if not argv or any(not isinstance(item, str) or not item for item in argv):
             raise SupervisorError("argv must contain non-empty strings")
+        if stdin_text is not None and not isinstance(stdin_text, str):
+            raise SupervisorError("stdin_text must be a string when set")
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise SupervisorError("timeout_seconds must be positive when set")
         if terminate_grace_seconds <= 0:
@@ -226,7 +229,7 @@ class SubprocessSupervisor:
                 *argv,
                 cwd=str(workdir),
                 env=environment,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
                 stdout=stdout_file,
                 stderr=stderr_file,
                 start_new_session=True,
@@ -284,6 +287,44 @@ class SubprocessSupervisor:
             stdout_file.close()
             stderr_file.close()
             raise
+
+        if stdin_text is not None:
+            if process.stdin is None:
+                raise SupervisorError("subprocess stdin pipe was not created")
+            try:
+                process.stdin.write(stdin_text.encode("utf-8"))
+                await process.stdin.drain()
+                process.stdin.close()
+                await process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                try:
+                    os.killpg(process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+                ended_at = utc_now()
+                stdout_file.close()
+                stderr_file.close()
+                with self.store._transaction():
+                    self.store._conn.execute(
+                        """
+                        UPDATE processes
+                        SET state='FAILED',ended_at=?,exit_status=?,last_liveness_at=?
+                        WHERE process_id=? AND ended_at IS NULL
+                        """,
+                        (ended_at, process.returncode, ended_at, process_id),
+                    )
+                    if attempt_id is not None:
+                        self.store._conn.execute(
+                            """
+                            UPDATE attempts
+                            SET status='PROCESS_FAILURE',ended_at=?,exit_status=?
+                            WHERE attempt_id=? AND ended_at IS NULL
+                            """,
+                            (ended_at, process.returncode, attempt_id),
+                        )
+                raise SupervisorError("subprocess exited before stdin could be delivered") from exc
+
         return ManagedProcess(
             store=self.store,
             process_id=process_id,

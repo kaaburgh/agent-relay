@@ -70,11 +70,13 @@ class WatchdogTests(unittest.TestCase):
             result = await wait_with_file_progress_watchdog(
                 handle,
                 progress_paths=[progress],
-                stall_timeout_seconds=0.1,
+                stall_timeout_seconds=0.2,
                 poll_interval_seconds=0.02,
             )
             self.assertEqual(result.state, "SUCCEEDED")
             self.assertFalse(result.stalled)
+            # The process deliberately runs longer than the stall window. It can succeed only
+            # if evidence changes are recognized as progress rather than liveness alone.
             self.assertGreater(time.monotonic() - started, 0.2)
 
         asyncio.run(scenario())

@@ -36,10 +36,10 @@ Depends on R05,R06. Structured review parsing validates verdicts and severities 
 ## R09 — Generic external-tool model and simulated expensive validator — DONE
 Depends on R06. A real supervised fake runtime writes incremental `runner-status.json`, `cycles.csv` and `summary.md` with deterministic metrics. The adapter requires matching run ID, completed N/N status, exactly N ordered successful cycle records and a summary before declaring success; exit zero with incomplete evidence fails closed. Cycle failure/crash, hang, nonzero exit, incremental visibility, orphan child and SIGTERM-ignore/SIGKILL cleanup are covered with real subprocesses.
 
-## R10 — First end-to-end happy path — READY
-Depends on R03,R07,R08,R09. Simulated writer -> frozen candidate -> validation -> independent review -> DONE with exact-generation provenance and semantic status/events.
+## R10 — First end-to-end happy path — DONE
+Depends on R03,R07,R08,R09. Deterministic orchestration now composes a real simulated writer process, frozen candidate generation, real simulated validator evidence, an independent reviewer process/worktree and the workflow state machine through `DONE`. Validation/review outcomes are persisted in SQLite with exact generation/SHA before state transitions consume them; semantic events expose the full happy-path history.
 
-## R11 — REQUEST_CHANGES/rework generations — FUTURE
+## R11 — REQUEST_CHANGES/rework generations — READY
 Depends on R10. Findings flow to fresh rework; new commit means new generation; validation/re-review use the new generation; historical reviews remain immutable.
 
 ## R12 — Provider-unavailable wait/retry — FUTURE

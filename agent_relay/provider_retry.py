@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -46,8 +47,6 @@ def _resume_stage_from_history(store: Store, task_id: str) -> str:
     ).fetchone()
     if row is None:
         raise StoreError("WAITING_PROVIDER task has no provider_unavailable history")
-    import json
-
     payload = json.loads(row["payload_json"])
     source = payload.get("from")
     if source not in _ACTIVE:
@@ -117,10 +116,12 @@ def record_provider_unavailable(
             """,
             (task_id, provider, reason, first_seen, now_text, next_retry, count),
         )
-        store._conn.execute(
+        cursor = store._conn.execute(
             "UPDATE tasks SET stage='WAITING_PROVIDER', updated_at=? WHERE task_id=? AND stage=?",
             (now_text, task_id, source),
         )
+        if cursor.rowcount != 1:
+            raise StoreError("task stage changed before provider wait could be committed")
         store._insert_event(
             task_id=task_id,
             event_type="provider_unavailable",
@@ -162,11 +163,12 @@ def resume_provider_if_due(
             return False
         resume_stage = _resume_stage_from_history(store, task_id)
         now_text = _iso(instant)
-        store._conn.execute(
+        cursor = store._conn.execute(
             "UPDATE tasks SET stage=?, stage_attempt=?, updated_at=? WHERE task_id=? AND stage='WAITING_PROVIDER'",
             (resume_stage, int(task["stage_attempt"]) + 1, now_text, task_id),
         )
-        store._conn.execute("DELETE FROM provider_waits WHERE task_id=?", (task_id,))
+        if cursor.rowcount != 1:
+            raise StoreError("task stage changed before provider retry could be committed")
         store._insert_event(
             task_id=task_id,
             event_type="provider_retry_started",
@@ -174,5 +176,38 @@ def resume_provider_if_due(
             generation=int(task["current_generation"]) or None,
             payload={"from": "WAITING_PROVIDER", "to": resume_stage, "provider": wait["provider"], "attempt_count": int(wait["attempt_count"])},
             created_at=now_text,
+        )
+    return True
+
+
+def clear_provider_wait(
+    store: Store,
+    *,
+    task_id: str,
+    provider: str,
+    now: datetime | None = None,
+) -> bool:
+    instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with store._transaction():
+        row = store._conn.execute(
+            "SELECT provider,attempt_count FROM provider_waits WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["provider"] != provider:
+            raise StoreError(
+                f"provider wait belongs to {row['provider']!r}, cannot clear it as {provider!r}"
+            )
+        store._conn.execute("DELETE FROM provider_waits WHERE task_id=?", (task_id,))
+        task = store._conn.execute(
+            "SELECT stage,current_generation FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        store._insert_event(
+            task_id=task_id,
+            event_type="provider_available",
+            stage=task["stage"] if task is not None else None,
+            generation=(int(task["current_generation"]) or None) if task is not None else None,
+            payload={"provider": provider, "attempt_count": int(row["attempt_count"])},
+            created_at=_iso(instant),
         )
     return True

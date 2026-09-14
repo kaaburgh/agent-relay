@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_relay.artifacts import ArtifactManager
 from agent_relay.git_workspace import record_candidate_generation
@@ -131,6 +132,49 @@ class FinalAuditProcessTests(unittest.TestCase):
         self.assertEqual(returned.status, "CANCELLED")
         self.assertEqual(returned.result, cancelled.result)
         self.assertFalse(layout.result_path.exists())
+        self.assertEqual(after, before)
+
+    def test_cancellation_between_precheck_and_result_commit_cannot_publish_late_result(self) -> None:
+        layout = self.artifacts.create_attempt(task_id="task-1", kind="writer")
+        attempt_id = layout.attempt.attempt_id
+        original_get = self.store.get_attempt
+        injected = False
+        cancelled = None
+
+        def get_then_cancel(requested_id: int):
+            nonlocal injected, cancelled
+            row = original_get(requested_id)
+            if requested_id == attempt_id and not injected:
+                injected = True
+                cancelled = self.store.finish_attempt(
+                    attempt_id=attempt_id,
+                    status="CANCELLED",
+                    result={"reason": "operator cancellation in finalization race"},
+                    exit_status=None,
+                )
+            return row
+
+        before = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=?",
+            (attempt_id,),
+        ).fetchone()[0]
+        with patch.object(self.store, "get_attempt", side_effect=get_then_cancel):
+            returned = self.artifacts.finalize_attempt(
+                layout,
+                status="SUCCESS",
+                result={"handoff": "late provider success"},
+                exit_status=0,
+            )
+
+        self.assertTrue(injected)
+        self.assertIsNotNone(cancelled)
+        self.assertEqual(returned.status, "CANCELLED")
+        self.assertEqual(returned.result, cancelled.result)
+        self.assertFalse(layout.result_path.exists())
+        after = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=?",
+            (attempt_id,),
+        ).fetchone()[0]
         self.assertEqual(after, before)
 
     def test_normal_parent_exit_does_not_leave_unmanaged_child_in_process_group(self) -> None:

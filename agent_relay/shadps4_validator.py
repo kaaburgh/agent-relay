@@ -57,6 +57,18 @@ _SUCCESS_STATES = {"completed", "complete", "success", "succeeded", "done", "pas
 _FAILURE_STATES = {"failed", "failure", "error", "crashed", "cancelled", "canceled", "timed_out", "timeout", "stalled"}
 _SUCCESS_CYCLE_STATUSES = {"ok", "success", "succeeded", "passed", "complete", "completed"}
 _FAILURE_CYCLE_STATUSES = {"failed", "failure", "error", "crashed", "timeout", "timed_out", "stalled"}
+_CYCLE_ID_FIELDS = ("cycle", "cycle_id", "index")
+
+
+def _validate_argv_template(template: Sequence[str]) -> None:
+    if not template or any(not isinstance(item, str) or not item for item in template):
+        raise ValueError("shadPS4 runner argv template must contain non-empty strings")
+    for item in template:
+        probe = item
+        for name in _ALLOWED_PLACEHOLDERS:
+            probe = probe.replace("{" + name + "}", "")
+        if "{" in probe or "}" in probe:
+            raise ValueError(f"unsupported shadPS4 argv placeholder in {item!r}")
 
 
 def _render_argv(
@@ -66,8 +78,7 @@ def _render_argv(
     requested_cycles: int,
     evidence_dir: Path,
 ) -> tuple[str, ...]:
-    if not template or any(not isinstance(item, str) or not item for item in template):
-        raise ValueError("shadPS4 runner argv template must contain non-empty strings")
+    _validate_argv_template(template)
     values = {
         "run_id": run_id,
         "requested_cycles": str(requested_cycles),
@@ -75,12 +86,6 @@ def _render_argv(
     }
     rendered: list[str] = []
     for item in template:
-        # Reject unknown braces rather than silently passing a typo into an expensive run.
-        probe = item
-        for name in _ALLOWED_PLACEHOLDERS:
-            probe = probe.replace("{" + name + "}", "")
-        if "{" in probe or "}" in probe:
-            raise ValueError(f"unsupported shadPS4 argv placeholder in {item!r}")
         for name, value in values.items():
             item = item.replace("{" + name + "}", value)
         rendered.append(item)
@@ -141,6 +146,21 @@ def _string_field(value: Mapping[str, Any], *names: str) -> str | None:
     return None
 
 
+def _cycle_sequence_error(records: Sequence[Mapping[str, Any]]) -> str | None:
+    has_identifier = [any(name in record for name in _CYCLE_ID_FIELDS) for record in records]
+    if not any(has_identifier):
+        return None
+    if not all(has_identifier):
+        return "cycle identifiers are partially missing"
+    sequence = [_integer_field(record, *_CYCLE_ID_FIELDS) for record in records]
+    if any(value is None for value in sequence):
+        return "cycle identifiers are invalid"
+    expected = list(range(1, len(records) + 1))
+    if sequence != expected:
+        return "cycle sequence is incomplete or out of order"
+    return None
+
+
 def _cycle_failure(records: Sequence[Mapping[str, Any]]) -> str | None:
     for index, record in enumerate(records, start=1):
         raw = _string_field(record, "status", "result", "outcome")
@@ -152,6 +172,12 @@ def _cycle_failure(records: Sequence[Mapping[str, Any]]) -> str | None:
         if normalized not in _SUCCESS_CYCLE_STATUSES:
             return f"cycle {index} has unsupported status {raw!r}"
     return None
+
+
+def _explicit_validation_failure(evidence_error: str) -> bool:
+    if evidence_error.startswith("runner state reports failure:"):
+        return True
+    return evidence_error.startswith("cycle ") and " reports failure status " in evidence_error
 
 
 class ShadPS4BloodborneValidator:
@@ -191,6 +217,7 @@ class ShadPS4BloodborneValidator:
             raise ValueError("generation must be positive")
         if not candidate_sha.strip():
             raise ValueError("candidate_sha must not be empty")
+        _validate_argv_template(argv_template)
         resolved_run_id = run_id or str(uuid.uuid4())
         layout = self.artifacts.create_attempt(
             task_id=task_id,
@@ -214,8 +241,6 @@ class ShadPS4BloodborneValidator:
             requested_cycles=requested_cycles,
             evidence_dir=evidence_dir,
         )
-        # Persist the rendered command too; ArtifactManager's command snapshot keeps the
-        # reusable template, while process metadata records what was actually executed.
         rendered_path = layout.directory / "rendered-command.json"
         rendered_path.write_text(json.dumps(list(argv), indent=2) + "\n", encoding="utf-8")
         self.store.register_artifact(
@@ -319,6 +344,9 @@ class ShadPS4BloodborneValidator:
             return completed, runner_state, records, status_path, cycles_path, summary_path, f"completed {completed}/{invocation.requested_cycles} cycles"
         if len(records) != invocation.requested_cycles:
             return completed, runner_state, records, status_path, cycles_path, summary_path, f"cycle evidence contains {len(records)}/{invocation.requested_cycles} records"
+        sequence_error = _cycle_sequence_error(records)
+        if sequence_error is not None:
+            return completed, runner_state, records, status_path, cycles_path, summary_path, sequence_error
         cycle_error = _cycle_failure(records)
         if cycle_error is not None:
             return completed, runner_state, records, status_path, cycles_path, summary_path, cycle_error
@@ -351,12 +379,17 @@ class ShadPS4BloodborneValidator:
             kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
             reason = process_result.state
         elif process_result.returncode != 0:
-            kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
-            reason = f"runner exit {process_result.returncode}"
+            if evidence_error is not None and _explicit_validation_failure(evidence_error):
+                kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
+                reason = evidence_error
+            elif evidence_error is None:
+                kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
+                reason = f"runner exit {process_result.returncode}"
+            else:
+                kind = ShadPS4ValidationResultKind.PROCESS_FAILURE
+                reason = f"runner exit {process_result.returncode}; {evidence_error}"
         elif evidence_error is not None:
-            # Explicit failure evidence is a deterministic validation failure; missing/malformed
-            # evidence is incomplete rather than silently passed.
-            if evidence_error.startswith("runner state reports failure") or evidence_error.startswith("cycle "):
+            if _explicit_validation_failure(evidence_error):
                 kind = ShadPS4ValidationResultKind.VALIDATION_FAILED
             else:
                 kind = ShadPS4ValidationResultKind.INCOMPLETE_EVIDENCE
@@ -413,7 +446,13 @@ class ShadPS4BloodborneValidator:
             reason=reason,
         )
 
-    async def run(self, *, stall_timeout_seconds: float | None = None, watchdog_poll_interval_seconds: float = 5.0, **kwargs: Any) -> ShadPS4ValidationResult:
+    async def run(
+        self,
+        *,
+        stall_timeout_seconds: float | None = None,
+        watchdog_poll_interval_seconds: float = 5.0,
+        **kwargs: Any,
+    ) -> ShadPS4ValidationResult:
         invocation = await self.start(**kwargs)
         return await self.finish(
             invocation,

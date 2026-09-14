@@ -30,10 +30,10 @@ Depends on R04. Managed processes use argv-only `asyncio.create_subprocess_exec`
 ## R07 — Simulated writer provider — DONE
 Depends on R05,R06. A declarative real-process fake writer supports sleep, file modification, real Git commit, success with/without commit, declared failure, hang, crash, malformed result, provider unavailability/rate limit and partial work before crash. Provider normalization distinguishes malformed output, process failure and provider unavailability. Worker atomically writes an independent `provider-result.json`, so commit/result checkpoints can complete without a provider callback. Integration tests use real temporary Git/worktrees and include standalone worker completion outside the provider adapter.
 
-## R08 — Structured review contract and simulated reviewer — READY
-Depends on R05,R06. Enforced verdict/severity schema, staged responses, fresh invocation IDs, malformed/failure/hang/unavailable behaviors. Malformed output can never approve.
+## R08 — Structured review contract and simulated reviewer — DONE
+Depends on R05,R06. Structured review parsing validates verdicts and severities fail-closed; `REQUEST_CHANGES`/missing-evidence verdicts require findings and multiple valid review objects are rejected as ambiguous. Each simulated review is a fresh real subprocess with a unique invocation ID and immutable attempt, bound before launch to the exact detached candidate worktree SHA/generation. Approve/request-changes, malformed output, provider unavailability, crash/failure and hang/timeout are covered. Malformed output never produces an approval.
 
-## R09 — Generic external-tool model and simulated expensive validator — FUTURE
+## R09 — Generic external-tool model and simulated expensive validator — READY
 Depends on R06. Real supervised fake runtime with incremental `runner-status.json`, `cycles.csv`, `summary.md`, metrics, cycle failure/hang/crash/incomplete evidence/orphan child/SIGTERM/SIGKILL behaviors. Exit zero alone never proves success.
 
 ## R10 — First end-to-end happy path — FUTURE

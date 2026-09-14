@@ -165,7 +165,7 @@ def _cycle_failure(records: Sequence[Mapping[str, Any]]) -> str | None:
     for index, record in enumerate(records, start=1):
         raw = _string_field(record, "status", "result", "outcome")
         if raw is None:
-            continue
+            return f"cycle {index} is missing status/result/outcome"
         normalized = raw.lower()
         if normalized in _FAILURE_CYCLE_STATUSES:
             return f"cycle {index} reports failure status {raw!r}"

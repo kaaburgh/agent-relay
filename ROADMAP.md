@@ -63,10 +63,10 @@ Depends on R11,R12,R16. Invalid reviewer output and exit-zero incomplete validat
 ## R18 — Complete deterministic integration suite — DONE
 Depends on R14,R15,R17. `tests/test_required_integration_scenarios.py` exposes the twelve product-contract scenarios as twelve named executable acceptance tests. Existing real Git/SQLite/subprocess recovery and guardrail scenarios are deliberately re-executed; provider-unavailable retry now uses an actual simulated writer process before and after `WAITING_PROVIDER`, and capacity-1 contention now proves two actual fake runtime processes cannot overlap. `docs/integration-scenarios.md` maps every required scenario to its acceptance test.
 
-## R19 — Chaos/stress and invariant sweeps — READY
-Depends on R18. Reproducible randomized failures/restarts/provider waits/reviews/tool failures/delayed results. Required demo executes >=100 workflows with recorded seed and invariants after every run.
+## R19 — Chaos/stress and invariant sweeps — DONE
+Depends on R18. A reproducible chaos runner creates a fresh tiny real Git repository and SQLite state for every workflow, executes real simulated subprocesses, and injects happy/rework, writer crash, provider wait/retry, validation failure/incomplete evidence, malformed review, delayed result, writer restart/recovery, and tool crash modes. The run guarantees every injection mode occurs, records seed/progress/failure in `chaos-report.json`, and checks provenance, DONE gates, writer ownership, candidate-event consistency and resource-capacity invariants after every workflow. Required demonstration ran 100 workflows with seed `20260914` successfully.
 
-## R20 — Operator CLI and doctor — FUTURE
+## R20 — Operator CLI and doctor — READY
 Depends on R18. Complete durable `task create/run/status/events/resume/cancel/doctor`; status exposes stage/candidate/process/time/event/review/retry/leases; doctor checks local prerequisites/auth usability without leaking secrets.
 
 ## R21 — Real Codex writer adapter — FUTURE

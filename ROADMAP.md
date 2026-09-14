@@ -81,11 +81,11 @@ Depends on R18,R20. External-config adapter for the existing harness normalizes 
 ## R24 — Minimal SSH external-tool runner — DONE
 Depends on R23. Local/remote execution remains separable through a minimal SSH transport over the existing supervised-process boundary. Remote argv/cwd/environment values are POSIX-quoted into a `sh -s` script sent over SSH stdin; task-controlled command values never pass through a local shell. Dedicated acceptance executes the generated script with hostile shell-looking arguments, verifies stdout/stderr/nonzero/timeout semantics and validates destination/path inputs. No distributed scheduler, implicit artifact transfer, or remote state machine is introduced.
 
-## R25 — Documentation/example configuration — IN PROGRESS
-Depends on R20,R21,R22,R23. Final architecture/state-machine/providers/simulation/recovery/shadPS4 docs plus credential-free examples and README five-minute simulations. Current WIP replaces the stale scaffold README, adds all required docs, corrects the simulated CLI example to the real `simulated_validator` contract, adds real-provider/SSH/Bloodborne examples, and introduces a dedicated documentation acceptance test. R25 remains incomplete until that gate and the full regression suite pass.
+## R25 — Documentation/example configuration — DONE
+Depends on R20,R21,R22,R23. Final architecture/state-machine/providers/simulation/recovery/shadPS4 docs, credential-free real/simulated examples and a current README with executable five-minute happy/rework/recovery simulations. Documentation acceptance verifies links, exact runnable test targets, schema-valid examples, no embedded credentials, capacity-1 runtime configuration and explicit SSH/shared-storage/artifact-transfer limitations.
 
-## R26 — Final correctness/security review and required demonstration — FUTURE
-Depends on R19,R21,R22,R23,R25. Adversarial review for races, atomicity, duplicate launches, orphan groups, stale provenance, lease leaks, history loss, unsafe Git/shell and unbounded state/logs; fix findings and actually run/report full suite plus all required demonstrations, including >=100 chaos workflows and exact real-provider/runtime connection steps.
+## R26 — Final correctness/security review and required demonstration — IN PROGRESS
+Depends on R19,R21,R22,R23,R25. Adversarial review for races, atomicity, duplicate launches, orphan groups, stale provenance, lease leaks, history loss, unsafe Git/shell and unbounded state/logs; fix findings and actually run/report full suite plus all required demonstrations, including >=100 chaos workflows and exact real-provider/runtime connection steps. Initial audit has identified bounded-log growth and concurrent external cancellation versus in-memory process finalization as concrete hypotheses requiring executable acceptance before the project can be declared complete.
 
 ## Non-goals
 

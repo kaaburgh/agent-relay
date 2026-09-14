@@ -2,59 +2,54 @@
 
 ## Current checkpoint
 
-Completed: `R00`–`R24`.
+Completed: `R00`–`R25`.
 
-In progress: `R25`.
+In progress: `R26`.
 
-Next bounded unit: `R25` — Documentation/example configuration.
+Next bounded unit: `R26` — Final correctness/security review and required demonstration.
 
-Acceptance pending: R25 documentation/examples have been prepared but must pass their dedicated documentation contract plus the full regression suite before R25 may be marked `DONE`.
+Acceptance pending: the final adversarial audit must convert material risks into executable checks, fix confirmed defects, rerun the full suite and required demonstrations, and record exact real-provider/runtime connection steps before the project can be marked complete.
 
-## R25 WIP — documentation and credential-free examples
+## R26 WIP — final adversarial correctness/security review
 
-This checkpoint replaces the stale scaffold-era README and adds the documentation set required by `docs/spec.md`:
+R26 started only after direct R25 acceptance. The audit covers the required failure classes: races/non-atomic transitions, duplicate launches, stale candidate/evidence provenance, orphan process groups, resource lease leaks/unsafe reclaim, unsafe Git/shell behavior, malformed-output fail-open paths, history loss, credential leakage and unbounded state/log growth.
 
-- `README.md` with current implementation status, safety boundaries, operator CLI notes and three executable five-minute simulation paths (happy path, `REQUEST_CHANGES`, restart recovery);
-- `docs/architecture.md`;
-- `docs/state-machine.md`;
-- `docs/providers.md`;
-- `docs/simulation.md`;
-- `docs/recovery.md`;
-- `docs/shadps4-example.md`.
+Initial read-only audit results before production changes:
 
-Example configuration is also updated/added:
+- no production `shell=True` use was found; managed local processes use argv execution and SSH isolates its required remote POSIX shell behind quoted stdin transport;
+- no production destructive `git reset --hard` or `git clean` use was found; managed Git work occurs in dedicated worktrees;
+- candidate generation, validation/review provenance, append-only events/evidence and capacity-1 lease behavior already have direct deterministic/chaos coverage;
+- `SubprocessSupervisor` currently writes child stdout/stderr directly to append-only files with no configured size bound. Long or hostile workers can therefore grow attempt logs without bound. This is a confirmed R26 design gap and requires a bounded capture strategy that does not deadlock child pipes or silently turn successful processes into failures;
+- process finalization is guarded only by the in-memory `ManagedProcess._finished` flag. `operator.cancel_task()` can independently mark the same durable process `CANCELLED`; a still-live `ManagedProcess.wait()` may subsequently attempt its own `_finish` and receive `StoreError` because the durable row is already finalized. This cross-owner cancellation/finalization race requires a reproducing test and idempotent/reconciled behavior rather than an uncaught error;
+- SSH explicitly does not guarantee cleanup for a remote process that deliberately daemonizes/detaches, and it does not implicitly transfer remote evidence. These are documented transport limits, not hidden guarantees.
 
-- `examples/config.simulated.yaml` now matches the real CLI simulation contract by using one local runner with `options.simulated_validator: true`; the old example did not satisfy `execution.py` and therefore could not back the documented `run --simulation` workflow;
-- `examples/config.real.example.yaml` demonstrates credential-free Codex writer, Claude reviewer, local/SSH runners and capacity-1 `bloodborne-runtime` configuration;
-- `examples/task.simulated.example.yaml` documents the one-validator CLI simulation shape;
-- `examples/task.shadps4.example.yaml` documents the external Bloodborne harness placeholders and runtime resource without hard-coding one user's installation as a repository default.
+The audit must also decide and document the real-backend composition boundary: Codex/Claude/shadPS4/SSH adapters exist and are individually acceptance-tested, while top-level ordinary `agent-relay run` remains intentionally fail-closed instead of pretending a production composition that has not been installed. R26 may keep that limitation only if the product contract is still satisfied and exact safe connection steps are provided; it must not claim a real end-to-end CLI path that does not exist.
 
-`tests/test_documentation.py` is the R25-specific acceptance gate. It checks the required doc set, stale README removal, local README links, existence of the exact quick-start unittest targets, config/task schema validity, credential-free examples, capacity-1 runtime example and explicit SSH/shared-storage/artifact-transfer limitations.
+Exact R26 recovery action:
 
-Exact R25 recovery action:
+1. Add R26-specific regression tests for the external-cancellation/finalization race and bounded stdout/stderr behavior; make them fail against the confirmed gaps before accepting a fix.
+2. Implement bounded log capture without `shell=True`, preserving real process-group timeout/stall/cancel semantics and useful tail evidence.
+3. Make process finalization reconcile an already-durable terminal process state safely, without overwriting a newer terminal state or losing exit metadata.
+4. Review store/evidence/recovery/lease/Git/provider adapters for additional atomicity, stale-provenance, duplicate-launch, orphan, history-loss and secret-leak paths; add tests for any material finding.
+5. Add `docs/final-review.md` with findings/dispositions and exact Codex/Claude/local-or-SSH shadPS4 connection steps, including current CLI-composition limitations.
+6. Run the R26-specific tests, full `python -m unittest discover -s tests -v`, all twelve deterministic required scenarios, and the seeded >=100 chaos workflow demonstration on the final production HEAD.
+7. Only after all material findings are fixed or explicitly bounded by the product contract may ROADMAP/status move R26 to `DONE`.
 
-1. Run `python -m unittest tests.test_documentation -v` through CI/current HEAD.
-2. Run the full `python -m unittest discover -s tests -v` suite after the latest documentation/example changes.
-3. Fix documentation/example/test defects without weakening the contract or inventing unsupported real-backend behavior.
-4. If green, atomically mark R25 `DONE`, set R26 `READY`, record exact CI evidence, and continue automatically into the final adversarial correctness/security review.
+## R25 acceptance — documentation/example configuration
+
+R25 replaced the stale scaffold README; added `docs/architecture.md`, `docs/state-machine.md`, `docs/providers.md`, `docs/simulation.md`, `docs/recovery.md`, and `docs/shadps4-example.md`; corrected the simulated CLI config to the real `options.simulated_validator: true` contract; and added credential-free Codex/Claude/SSH/Bloodborne examples plus `tests/test_documentation.py`.
+
+The first R25 CI run `34839845987` on `d1b0aca5fa4ebe9e0f9559c70f2e8d2a8f7cfcaa` failed one documentation-contract check because the shadPS4 remote-evidence section described mounted/visible storage without explicitly naming it shared storage. That ambiguity was fixed. The second run `34839968005` on `5b0e3f1551e5e1771903da6fa61da3200e67ddc7` then exposed the same terminology gap in `docs/providers.md`; all other 154 tests passed. That second ambiguity was also fixed rather than weakening the test.
+
+Final R25 acceptance: GitHub Actions run `34840078585` on `126f618e044a1166d3f5ddab0e0bd818f42c7b38`: PASS, 155 tests in 45.001s on Python 3.12.14, including all five documentation-specific acceptance tests and the seeded 100-workflow chaos regression.
 
 ## R24 acceptance — minimal SSH external-tool transport
 
-R24 is complete. `agent_relay/ssh_runner.py` exposes `SSHExternalToolRunner` on the existing `SubprocessSupervisor`/`ManagedProcess` boundary. The local `ssh` client is argv-launched with `-T` and `BatchMode=yes`; remote argv/cwd/environment additions are POSIX-quoted and sent to constant `sh -s` over stdin, keeping task-controlled command values out of a local shell command line.
-
-The transport remains intentionally minimal: no remote workflow state machine, distributed queue/scheduler, implicit SCP/rsync/artifact transfer or claim that arbitrary daemonized remote descendants are killed when the SSH connection dies. Remote evidence must be visible to the local orchestrator through shared storage or an explicit higher-level transfer step.
-
-Initial R24 CI run `34835972840` on `d14d4cbe46304da8e1f583b47423cdf80baabdca`: PASS, 149 tests. Before accepting the unit, the test was strengthened to execute the generated launch script through a real `/bin/sh -s`, proving shell-looking arguments/environment values containing whitespace, `;`, `$()` and quotes remain literal rather than executing injected commands. The first test also emitted a Python invalid-escape `SyntaxWarning`, which was removed.
-
-Final R24 acceptance: GitHub Actions run `34836178935` on `a0b4e69abf7f8a7d0ef3f9376cd22f5a3bf008f9`: PASS, 150 tests in 64.759s on Python 3.12.14, including the strengthened end-to-end SSH quoting test and the seeded 100-workflow chaos regression.
+Final R24 acceptance: GitHub Actions run `34836178935` on `a0b4e69abf7f8a7d0ef3f9376cd22f5a3bf008f9`: PASS, 150 tests in 64.759s. The dedicated test executes the generated remote script through real `/bin/sh -s` with shell-looking arguments/environment values and verifies they remain literal. Remote artifact transfer and arbitrary detached-remote-process cleanup remain explicit non-guarantees.
 
 ## R23 acceptance — real shadPS4/Bloodborne tool adapter
 
-`agent_relay/shadps4_validator.py` wraps the existing harness as an external evidence boundary. Bloodborne menu/death/reload behavior remains outside orchestration core.
-
-The first dedicated R23 gate, GitHub Actions run `34834967782`, exposed a production classification bug: `cycle evidence contains 2/3 records` was incorrectly treated as deterministic validation failure. The fix narrowed explicit validation-failure classification, moved argv validation before attempt allocation, and validated cycle ordering when identifiers are present.
-
-Final R23 acceptance: GitHub Actions run `34835209968` on `e4b882864cc1b84c3ccbca4c0f5ce5cb026b9d27`: PASS, 143 tests. Dedicated cases cover CSV/JSON success, exact provenance/artifacts, incomplete/mismatched/out-of-order evidence, explicit runner/cycle failure, crash/nonzero, timeout/stall and pre-attempt placeholder validation.
+Final R23 acceptance: GitHub Actions run `34835209968` on `e4b882864cc1b84c3ccbca4c0f5ce5cb026b9d27`: PASS, 143 tests. The dedicated gate previously caught and fixed incomplete-cycle evidence being misclassified as deterministic validation failure.
 
 ## Development protocol guard
 
@@ -75,8 +70,6 @@ Development status is machine-checked:
 - SQLite is durable/fail-closed; semantic events and completed validation/review evidence are append-only.
 - Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
-- Prompts may be delivered over stdin so task instructions are not copied into process argv metadata.
-- Credential redaction must distinguish secret token material from numeric token-usage telemetry.
 - Provider/tool process success never substitutes for deterministic Git/evidence acceptance gates.
 - Malformed reviewer output and incomplete deterministic validation evidence block rather than fail open.
 - Correction rounds are bounded and rejected-generation history remains auditable.

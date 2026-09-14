@@ -2,27 +2,26 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`.
+Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`, `R15`.
 
-Next bounded unit: `R15 — External-validation restart recovery`.
+Next bounded unit: `R16 — Cancellation, timeout, stall watchdog, cleanup`.
 
-## R01–R13 summary
+## R01–R14 summary
 
-Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated writer/reviewer/validator workers, happy-path and rework orchestration, durable provider retry, and generic persisted resource leases are implemented using real temporary Git/SQLite/subprocess semantics.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision, simulated providers/tools, happy-path and rework orchestration, provider retry, persisted resource leases, and writer restart recovery are implemented with real temporary Git/SQLite/subprocess semantics.
 
-## R14 evidence
+## R15 evidence
 
-Implemented `agent_relay/writer_recovery.py` and `tests/test_writer_recovery.py`.
+Implemented `agent_relay/validator_recovery.py` and `tests/test_validator_recovery.py`.
 
-Writer recovery guarantees:
+External-validation recovery guarantees:
 
-- a real separately running simulated writer process may outlive the first orchestrator/SQLite `Store` instance;
-- while the recorded PID is still live and no durable result exists, reconciliation returns `RUNNING` and never launches a duplicate writer;
-- after the first Store is closed, the worker independently modifies the real managed worktree, commits the candidate, writes `provider-result.json`, and exits;
-- a newly opened Store reconciles provider result + real Git HEAD + durable process/attempt evidence into the original writer attempt and candidate generation;
-- recovery finalizes the original attempt, repairs the stale durable process row to `SUCCEEDED`, records the exact candidate SHA/generation, and emits `writer_recovered`;
-- repeated reconciliation is idempotent: it returns `ALREADY_RECOVERED` without adding attempts, candidate generations, semantic events, or a second expensive worker launch;
-- missing result plus no live recorded process is treated as ambiguous ownership and fails closed rather than guessing that a relaunch is safe.
+- a real detached simulated validator can hold a persisted capacity lease and continue running after the first Store is closed;
+- a live recorded validator process reconciles as `RUNNING`, preventing duplicate expensive launch;
+- after the worker exits while the Store is absent, a new Store validates `runner-status.json`, ordered N/N `cycles.csv`, `summary.md`, run ID, generation, and candidate SHA before accepting completion;
+- successful recovery finalizes the original validation attempt, repairs the stale process row, persists exact validation evidence, registers deterministic evidence artifacts, releases the original resource lease, and emits recovery/release semantic evidence;
+- dead process plus incomplete/missing evidence reconciles as `AMBIGUOUS`: no validation row is created and the lease remains active, deliberately blocking overlap until an operator or stronger evidence resolves ownership;
+- the recovery test uses a real Git candidate generation, real SQLite reopen, a real separate validator subprocess, and the persisted lease table rather than mocks.
 
 Acceptance command:
 
@@ -30,11 +29,11 @@ Acceptance command:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions on `535caec5292128739084270f6c9e86161fa4f4e4`: PASS on Python 3.12.
+GitHub Actions on `b54bc3c95ff73d4b9fe74f419b782c0b82786901`: PASS on Python 3.12.
 
 ## Current product state
 
-The writer side now has a real restart boundary: durable filesystem/Git/SQLite evidence is sufficient to recover a completed worker without duplicate launch. The next gap is the analogous expensive-validator recovery path, including persisted resource-lease ownership and fail-closed behavior for ambiguous/incomplete evidence.
+Both writer and expensive-validator restart boundaries now reconcile durable evidence before considering relaunch. Ambiguous validator ownership holds its resource lease fail-closed. Next is explicit cancellation/timeout/stall classification and cleanup, including legitimate long runs and watchdog behavior without event spam.
 
 ## Durable decisions
 
@@ -44,9 +43,9 @@ The writer side now has a real restart boundary: durable filesystem/Git/SQLite e
 - SQLite is durable/fail-closed; semantic events and completed validation/review evidence are append-only.
 - Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
-- Provider retry timing is explicit durable data; no busy-spin or implicit retry loop.
 - Resource serialization is named/capacity-based and persisted rather than a global in-memory mutex.
-- Restart recovery reconciles durable evidence before considering any expensive relaunch.
+- Restart recovery reconciles durable result/process/filesystem evidence before any expensive relaunch.
+- Ambiguous expensive-validator ownership retains its lease instead of failing open.
 - Bloodborne-specific behavior stays outside orchestration core.
 
 ## Handoff protocol

@@ -72,7 +72,7 @@ The exact flags belong to the installed harness contract; agent-relay does not a
 
 `SSHExternalToolRunner` can transport a command to another machine, but it does **not** copy evidence back. `ShadPS4BloodborneValidator` reads evidence locally after the process finishes. Therefore a remote harness can be connected safely only when one of these is true:
 
-- the configured evidence path is on storage mounted/visible at the same logical location to the orchestrator and remote node; or
+- the configured evidence path is on shared storage mounted/visible at the same logical location to the orchestrator and remote node; or
 - an explicit artifact-transfer step copies the completed evidence into the local attempt/evidence directory before the adapter parses it.
 
 The current SSH transport has no implicit SCP/rsync layer. Do not configure a remote path and assume the local validator can see it.

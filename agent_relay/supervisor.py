@@ -3,12 +3,22 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from .artifacts import redact
+from .runtime_safety import (
+    capture_process_identity,
+    claim_attempt_launch,
+    clear_launch_claim_in_transaction,
+    ensure_runtime_safety_guards,
+    persist_process_identity,
+    release_attempt_launch_claim,
+    verify_launch_claim_owned_by_current_process,
+)
 from .store import Store, StoreError, utc_now
 
 
@@ -156,12 +166,7 @@ class ManagedProcess:
             return
 
     async def _wait_for_leader_exit(self, deadline: float | None = None) -> bool:
-        """Observe leader exit without waiting for inherited stdout/stderr pipes to close.
-
-        asyncio's Process.wait() can remain pending after the direct child exits when one of
-        its descendants inherited a PIPE fd. ``returncode`` is set by the child watcher as
-        soon as the direct child exits, so it is the correct liveness signal for the leader.
-        """
+        """Observe leader exit without waiting for inherited stdout/stderr pipes to close."""
         while self.process.returncode is None:
             if deadline is None:
                 await asyncio.sleep(0.01)
@@ -340,8 +345,6 @@ class ManagedProcess:
             await self._finish("CANCELLED", timed_out=False, forced_kill=forced)
             raise
 
-        # The direct child is gone, but descendants may still hold process-group membership
-        # and inherited pipe descriptors. Clean them before draining/finalizing evidence.
         forced = await self._terminate_group()
         state = "SUCCEEDED" if self.process.returncode == 0 else "FAILED"
         return await self._finish(state, timed_out=False, forced_kill=forced)
@@ -361,6 +364,43 @@ class ManagedProcess:
 class SubprocessSupervisor:
     def __init__(self, store: Store) -> None:
         self.store = store
+        ensure_runtime_safety_guards(store)
+
+    async def _mark_launch_failure(
+        self,
+        *,
+        process: asyncio.subprocess.Process,
+        process_group_id: int,
+        process_id: int,
+        attempt_id: int | None,
+        capture_tasks: Sequence[asyncio.Task[None]],
+        status: str = "PROCESS_FAILURE",
+    ) -> None:
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+        await asyncio.gather(*capture_tasks, return_exceptions=True)
+        ended_at = utc_now()
+        with self.store._transaction():
+            self.store._conn.execute(
+                """
+                UPDATE processes
+                SET state='FAILED',ended_at=?,exit_status=?,last_liveness_at=?
+                WHERE process_id=? AND ended_at IS NULL
+                """,
+                (ended_at, process.returncode, ended_at, process_id),
+            )
+            if attempt_id is not None:
+                self.store._conn.execute(
+                    """
+                    UPDATE attempts
+                    SET status=?,ended_at=?,exit_status=?
+                    WHERE attempt_id=? AND ended_at IS NULL
+                    """,
+                    (status, ended_at, process.returncode, attempt_id),
+                )
 
     async def start(
         self,
@@ -404,25 +444,65 @@ class SubprocessSupervisor:
         err_path.touch(exist_ok=True)
         same_output = out_path.resolve() == err_path.resolve()
 
+        if attempt_id is not None:
+            claim_attempt_launch(self.store, task_id=task_id, attempt_id=attempt_id)
+
         environment = os.environ.copy()
         environment.update(dict(env_additions or {}))
         started_at = utc_now()
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(workdir),
-            env=environment,
-            stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=(asyncio.subprocess.STDOUT if same_output else asyncio.subprocess.PIPE),
-            start_new_session=True,
-        )
+        gate_read_fd: int | None = None
+        gate_write_fd: int | None = None
+        launch_argv = tuple(argv)
+        pass_fds: tuple[int, ...] = ()
+        if attempt_id is not None:
+            gate_read_fd, gate_write_fd = os.pipe()
+            launch_argv = (
+                sys.executable,
+                "-m",
+                "agent_relay.launch_gate",
+                "--gate-fd",
+                str(gate_read_fd),
+                "--",
+                *argv,
+            )
+            pass_fds = (gate_read_fd,)
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *launch_argv,
+                cwd=str(workdir),
+                env=environment,
+                stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=(asyncio.subprocess.STDOUT if same_output else asyncio.subprocess.PIPE),
+                start_new_session=True,
+                pass_fds=pass_fds,
+            )
+        except BaseException:
+            if gate_read_fd is not None:
+                os.close(gate_read_fd)
+            if gate_write_fd is not None:
+                os.close(gate_write_fd)
+            if attempt_id is not None:
+                release_attempt_launch_claim(self.store, task_id=task_id, attempt_id=attempt_id)
+            raise
+        finally:
+            if gate_read_fd is not None:
+                try:
+                    os.close(gate_read_fd)
+                except OSError:
+                    pass
 
         if process.stdout is None:
+            if gate_write_fd is not None:
+                os.close(gate_write_fd)
             try:
                 os.killpg(int(process.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
             await process.wait()
+            if attempt_id is not None:
+                release_attempt_launch_claim(self.store, task_id=task_id, attempt_id=attempt_id)
             raise SupervisorError("subprocess stdout pipe was not created")
 
         capture_streams: list[asyncio.StreamReader] = [process.stdout]
@@ -433,6 +513,8 @@ class SubprocessSupervisor:
         ]
         if not same_output:
             if process.stderr is None:
+                if gate_write_fd is not None:
+                    os.close(gate_write_fd)
                 try:
                     os.killpg(int(process.pid), signal.SIGKILL)
                 except ProcessLookupError:
@@ -441,6 +523,8 @@ class SubprocessSupervisor:
                 for task in capture_tasks:
                     task.cancel()
                 await asyncio.gather(*capture_tasks, return_exceptions=True)
+                if attempt_id is not None:
+                    release_attempt_launch_claim(self.store, task_id=task_id, attempt_id=attempt_id)
                 raise SupervisorError("subprocess stderr pipe was not created")
             capture_streams.append(process.stderr)
             capture_tasks.append(
@@ -453,19 +537,24 @@ class SubprocessSupervisor:
         process_group_id = int(process.pid)
         safe_command = redact(list(argv))
         try:
+            identity = capture_process_identity(int(process.pid))
             with self.store._transaction():
                 if self.store._conn.execute(
                     "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)
                 ).fetchone() is None:
                     raise StoreError(f"unknown task: {task_id}")
                 if attempt_id is not None:
+                    verify_launch_claim_owned_by_current_process(
+                        self.store, attempt_id=attempt_id
+                    )
                     attempt = self.store._conn.execute(
-                        "SELECT task_id, ended_at FROM attempts WHERE attempt_id=?", (attempt_id,)
+                        "SELECT task_id,status,ended_at FROM attempts WHERE attempt_id=?",
+                        (attempt_id,),
                     ).fetchone()
                     if attempt is None or attempt["task_id"] != task_id:
                         raise StoreError("attempt does not belong to task")
-                    if attempt["ended_at"] is not None:
-                        raise StoreError("cannot attach process to finalized attempt")
+                    if attempt["ended_at"] is not None or attempt["status"] != "LAUNCHING":
+                        raise StoreError("attempt launch ownership changed before publication")
                 cursor = self.store._conn.execute(
                     """
                     INSERT INTO processes(
@@ -478,34 +567,76 @@ class SubprocessSupervisor:
                         attempt_id,
                         process.pid,
                         process_group_id,
-                        __import__("json").dumps(safe_command, sort_keys=True, separators=(",", ":")),
+                        __import__("json").dumps(
+                            safe_command, sort_keys=True, separators=(",", ":")
+                        ),
                         started_at,
                         started_at,
                     ),
                 )
                 process_id = int(cursor.lastrowid)
+                persist_process_identity(
+                    self.store, process_id=process_id, identity=identity
+                )
                 if attempt_id is not None:
-                    self.store._conn.execute(
-                        "UPDATE attempts SET pid=?, status='RUNNING' WHERE attempt_id=?",
+                    updated = self.store._conn.execute(
+                        """
+                        UPDATE attempts SET pid=?, status='RUNNING'
+                        WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL
+                        """,
                         (process.pid, attempt_id),
                     )
+                    if updated.rowcount != 1:
+                        raise StoreError("attempt changed before process publication")
+                    clear_launch_claim_in_transaction(self.store, attempt_id=attempt_id)
         except BaseException:
+            if gate_write_fd is not None:
+                try:
+                    os.close(gate_write_fd)
+                except OSError:
+                    pass
             try:
                 os.killpg(process_group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             await process.wait()
             await asyncio.gather(*capture_tasks, return_exceptions=True)
+            if attempt_id is not None:
+                try:
+                    release_attempt_launch_claim(
+                        self.store, task_id=task_id, attempt_id=attempt_id
+                    )
+                except Exception:
+                    pass
             raise
+
+        if gate_write_fd is not None:
+            try:
+                os.write(gate_write_fd, b"1")
+            except OSError as exc:
+                await self._mark_launch_failure(
+                    process=process,
+                    process_group_id=process_group_id,
+                    process_id=process_id,
+                    attempt_id=attempt_id,
+                    capture_tasks=capture_tasks,
+                )
+                raise SupervisorError("launch gate failed before target command exec") from exc
+            finally:
+                try:
+                    os.close(gate_write_fd)
+                except OSError:
+                    pass
 
         if stdin_text is not None:
             if process.stdin is None:
-                try:
-                    os.killpg(process_group_id, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-                await asyncio.gather(*capture_tasks, return_exceptions=True)
+                await self._mark_launch_failure(
+                    process=process,
+                    process_group_id=process_group_id,
+                    process_id=process_id,
+                    attempt_id=attempt_id,
+                    capture_tasks=capture_tasks,
+                )
                 raise SupervisorError("subprocess stdin pipe was not created")
             try:
                 process.stdin.write(stdin_text.encode("utf-8"))
@@ -513,31 +644,13 @@ class SubprocessSupervisor:
                 process.stdin.close()
                 await process.stdin.wait_closed()
             except (BrokenPipeError, ConnectionResetError) as exc:
-                try:
-                    os.killpg(process_group_id, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-                await asyncio.gather(*capture_tasks, return_exceptions=True)
-                ended_at = utc_now()
-                with self.store._transaction():
-                    self.store._conn.execute(
-                        """
-                        UPDATE processes
-                        SET state='FAILED',ended_at=?,exit_status=?,last_liveness_at=?
-                        WHERE process_id=? AND ended_at IS NULL
-                        """,
-                        (ended_at, process.returncode, ended_at, process_id),
-                    )
-                    if attempt_id is not None:
-                        self.store._conn.execute(
-                            """
-                            UPDATE attempts
-                            SET status='PROCESS_FAILURE',ended_at=?,exit_status=?
-                            WHERE attempt_id=? AND ended_at IS NULL
-                            """,
-                            (ended_at, process.returncode, attempt_id),
-                        )
+                await self._mark_launch_failure(
+                    process=process,
+                    process_group_id=process_group_id,
+                    process_id=process_id,
+                    attempt_id=attempt_id,
+                    capture_tasks=capture_tasks,
+                )
                 raise SupervisorError("subprocess exited before stdin could be delivered") from exc
 
         return ManagedProcess(

@@ -273,7 +273,10 @@ class ManagedProcess:
 
             requested_state = state
             if capture_failed and requested_state == "SUCCEEDED":
-                requested_state = "FAILED"
+                # FAILED is a normal nonzero child-exit state in the adapter contract. Use a
+                # distinct terminal state so zero-exit output-capture corruption can never be
+                # mistaken for an ordinary successful child by provider/tool adapters.
+                requested_state = "CAPTURE_FAILED"
 
             final_state = requested_state
             final_ended_at = ended_at

@@ -51,7 +51,6 @@ def ensure_runtime_safety_guards(store: Store) -> None:
             )
             """
         )
-        # A task may have historical writer attempts, but only one may own execution now.
         store._conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_writer_owner
@@ -59,7 +58,6 @@ def ensure_runtime_safety_guards(store: Store) -> None:
             WHERE kind='writer' AND ended_at IS NULL AND status IN ('LAUNCHING','RUNNING')
             """
         )
-        # One durable attempt cannot own two concurrently running OS processes.
         store._conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_one_running_process_per_attempt
@@ -80,7 +78,7 @@ def _read_boot_id() -> str:
     return value
 
 
-def _read_proc_stat(pid: int) -> tuple[str, int, int, int]:
+def _read_proc_fields(pid: int) -> list[str]:
     path = Path(f"/proc/{pid}/stat")
     try:
         raw = path.read_text(encoding="utf-8")
@@ -92,13 +90,35 @@ def _read_proc_stat(pid: int) -> tuple[str, int, int, int]:
     if close < 0:
         raise RuntimeSafetyError(f"malformed /proc/{pid}/stat")
     fields = raw[close + 2 :].split()
-    # fields[0] is stat field 3 (state); pgrp/session are 5/6 and starttime is 22.
     if len(fields) <= 19:
         raise RuntimeSafetyError(f"short /proc/{pid}/stat")
+    return fields
+
+
+def _read_proc_stat(pid: int) -> tuple[str, int, int, int]:
+    fields = _read_proc_fields(pid)
     try:
+        # fields[0] is stat field 3 (state); pgrp/session are 5/6 and starttime is 22.
         return fields[0], int(fields[2]), int(fields[3]), int(fields[19])
     except ValueError as exc:
         raise RuntimeSafetyError(f"invalid numeric process identity for pid {pid}") from exc
+
+
+def _legacy_direct_child_is_live(pid: int) -> bool:
+    """Compatibility only for old synthetic fixtures that never published identity.
+
+    A real supervisor-managed RUNNING attempt is never left in CREATED state. We therefore
+    permit PID-only liveness only for that impossible production combination, and only while
+    the process is a direct child of this same Python process. It cannot authorize restart
+    ownership or operator signalling.
+    """
+    try:
+        fields = _read_proc_fields(pid)
+        state = fields[0]
+        parent_pid = int(fields[1])  # stat field 4
+    except (ProcessLookupError, RuntimeSafetyError, ValueError):
+        return False
+    return state != "Z" and parent_pid == os.getpid()
 
 
 def capture_process_identity(pid: int) -> ProcessIdentity:
@@ -124,12 +144,7 @@ def pid_matches_identity(pid: int, *, boot_id: str, start_time_ticks: int) -> bo
 
 
 def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None:
-    """Durably claim one attempt before any side-effecting command can exec.
-
-    A stale LAUNCHING claim is reclaimable only when the original orchestrator process
-    identity is provably gone. This makes crashes before child publication fail closed
-    without permanently poisoning the attempt.
-    """
+    """Durably claim one attempt before any side-effecting command can exec."""
     owner = capture_process_identity(os.getpid())
     with store._transaction():
         task = store._conn.execute(
@@ -156,8 +171,6 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
                 start_time_ticks=int(claim["owner_start_time_ticks"]),
             ):
                 raise RuntimeSafetyError("attempt already has a live launch owner")
-            # The old owner is gone. Its launch-gate pipe is therefore closed, so a gate
-            # created before the crash cannot exec the target command.
             store._conn.execute("DELETE FROM launch_claims WHERE attempt_id=?", (attempt_id,))
             store._conn.execute(
                 "UPDATE attempts SET status='CREATED' WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL",
@@ -211,7 +224,6 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
 
 
 def release_attempt_launch_claim(store: Store, *, task_id: str, attempt_id: int) -> None:
-    """Return this process's un-published launch claim to CREATED after spawn failure."""
     owner = capture_process_identity(os.getpid())
     with store._transaction():
         claim = store._conn.execute(
@@ -259,7 +271,6 @@ def persist_process_identity(
     process_id: int,
     identity: ProcessIdentity,
 ) -> None:
-    """Persist identity inside the caller's existing write transaction."""
     store._conn.execute(
         """
         INSERT INTO process_identities(
@@ -318,13 +329,20 @@ def _owned_group_member_exists(identity: ProcessIdentity) -> bool:
 
 
 def process_ownership_is_live(store: Store, process_row: Any) -> bool:
-    """Return true only when the persisted process identity still owns this PID/group.
-
-    Legacy rows without an identity are intentionally not treated as live after restart.
-    Numeric PID/PGID existence alone is not durable ownership proof.
-    """
     identity = load_process_identity(store, int(process_row["process_id"]))
     if identity is None:
+        attempt_id = process_row["attempt_id"]
+        if attempt_id is None:
+            return False
+        attempt = store._conn.execute(
+            "SELECT status,ended_at FROM attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if (
+            attempt is not None
+            and attempt["ended_at"] is None
+            and attempt["status"] == "CREATED"
+        ):
+            return _legacy_direct_child_is_live(int(process_row["pid"]))
         return False
     try:
         if _read_boot_id() != identity.boot_id:
@@ -339,12 +357,15 @@ def process_ownership_is_live(store: Store, process_row: Any) -> bool:
         return _owned_group_member_exists(identity)
     except RuntimeSafetyError:
         return False
-    return (
-        state != "Z"
-        and start_time_ticks == identity.start_time_ticks
+    if (
+        start_time_ticks == identity.start_time_ticks
         and pgrp == identity.process_group_id
         and session_id == identity.session_id
-    )
+    ):
+        if state != "Z":
+            return True
+        return _owned_group_member_exists(identity)
+    return False
 
 
 def process_identity_debug(store: Store, process_id: int) -> str:

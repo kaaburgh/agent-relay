@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from agent_relay import resource_leases
 from agent_relay.resource_leases import (
     LeaseUnavailable,
     acquire_lease,
@@ -165,6 +167,46 @@ class ResourceLeaseTests(unittest.TestCase):
             self.assertIn("resource_acquired", events)
             self.assertEqual(events[-1], "resource_released")
         asyncio.run(scenario())
+
+    def test_stale_reclaim_rechecks_heartbeat_after_candidate_snapshot(self) -> None:
+        configure_resource(self.store, "runtime", 1)
+        lease = acquire_lease(
+            self.store,
+            resource_name="runtime",
+            holder_id="race-holder",
+            task_id="task-1",
+            attempt_id=self.attempt1.attempt_id,
+            now=self.t0,
+        )
+        reclaim_now = self.t0 + timedelta(hours=1)
+        original_active_leases = resource_leases.active_leases
+        injected = False
+
+        def snapshot_then_heartbeat(store: Store, resource_name: str | None = None):
+            nonlocal injected
+            snapshot = original_active_leases(store, resource_name)
+            if not injected:
+                injected = True
+                heartbeat_lease(
+                    store,
+                    lease_id=lease.lease_id,
+                    holder_id=lease.holder_id,
+                    now=reclaim_now - timedelta(seconds=1),
+                )
+            return snapshot
+
+        with patch.object(resource_leases, "active_leases", side_effect=snapshot_then_heartbeat):
+            reclaimed = reclaim_stale_leases(
+                self.store,
+                stale_after=timedelta(seconds=10),
+                now=reclaim_now,
+            )
+
+        self.assertEqual(reclaimed, ())
+        current = active_leases(self.store, "runtime")
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0].lease_id, lease.lease_id)
+        self.assertEqual(current[0].heartbeat_at, (reclaim_now - timedelta(seconds=1)).isoformat(timespec="microseconds"))
 
 
 if __name__ == "__main__":

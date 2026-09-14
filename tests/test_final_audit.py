@@ -12,6 +12,16 @@ from agent_relay.store import Store
 from agent_relay.supervisor import SubprocessSupervisor
 
 
+def _pid_is_live(pid: int) -> bool:
+    stat = Path(f"/proc/{pid}/stat")
+    if not stat.exists():
+        return False
+    try:
+        return stat.read_text(encoding="utf-8").split()[2] != "Z"
+    except (FileNotFoundError, IndexError):
+        return False
+
+
 class FinalAuditProcessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -119,6 +129,38 @@ class FinalAuditProcessTests(unittest.TestCase):
         self.assertEqual(returned.result, cancelled.result)
         self.assertFalse(layout.result_path.exists())
         self.assertEqual(after, before)
+
+    def test_normal_parent_exit_does_not_leave_unmanaged_child_in_process_group(self) -> None:
+        async def scenario() -> None:
+            child_pid_file = self.root / "audit-child.pid"
+            layout = self.artifacts.create_attempt(task_id="task-1", kind="tool")
+            code = (
+                "import pathlib,subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)']); "
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(p.pid))"
+            )
+            handle = await self.supervisor.start(
+                task_id="task-1",
+                attempt_id=layout.attempt.attempt_id,
+                argv=[sys.executable, "-c", code],
+                cwd=self.root,
+                stdout_path=layout.stdout_path,
+                stderr_path=layout.stderr_path,
+                terminate_grace_seconds=0.05,
+                heartbeat_interval=0.02,
+            )
+            result = await asyncio.wait_for(handle.wait(), timeout=2.0)
+            self.assertEqual(result.state, "SUCCEEDED")
+            self.assertTrue(child_pid_file.exists())
+            child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+            for _ in range(100):
+                if not _pid_is_live(child_pid):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("child process remained live after managed parent exited")
+
+        asyncio.run(scenario())
 
     def test_production_source_avoids_local_shell_and_destructive_git_cleanup(self) -> None:
         package_root = Path(__file__).resolve().parents[1] / "agent_relay"

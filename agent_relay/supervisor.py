@@ -6,7 +6,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence, TextIO
+from typing import Mapping, Sequence
 
 from .artifacts import redact
 from .store import Store, StoreError, utc_now
@@ -14,6 +14,11 @@ from .store import Store, StoreError, utc_now
 
 class SupervisorError(RuntimeError):
     pass
+
+
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+_TRUNCATION_MARKER = b"[agent-relay: earlier output truncated; retaining tail]\n"
+_CAPTURE_DRAIN_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,77 @@ class ProcessResult:
     stalled: bool = False
 
 
+async def _capture_bounded_tail(
+    stream: asyncio.StreamReader,
+    path: Path,
+    *,
+    max_bytes: int,
+) -> None:
+    """Continuously drain a subprocess stream while bounding durable log growth.
+
+    Output is appended normally until the configured limit would be crossed. From that
+    point on, the file remains bounded while an in-memory tail of at most ``max_bytes`` is
+    retained. At EOF the file is replaced by an explicit truncation marker plus the tail.
+    The bounded reader keeps draining even after truncation so a noisy child cannot block on
+    a full OS pipe.
+    """
+    tail_limit = max_bytes - len(_TRUNCATION_MARKER)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+
+    existing_size = path.stat().st_size
+    truncated = existing_size > max_bytes
+    tail = bytearray()
+    output = None
+    stored_size = existing_size
+
+    if truncated:
+        with path.open("rb") as source:
+            if existing_size > tail_limit:
+                source.seek(-tail_limit, os.SEEK_END)
+            tail.extend(source.read())
+        if len(tail) > tail_limit:
+            del tail[:-tail_limit]
+        with path.open("wb") as sink:
+            sink.write(_TRUNCATION_MARKER)
+            sink.write(tail)
+    else:
+        output = path.open("ab", buffering=0)
+
+    try:
+        while True:
+            chunk = await stream.read(64 * 1024)
+            if not chunk:
+                break
+            if not truncated and stored_size + len(chunk) <= max_bytes:
+                assert output is not None
+                output.write(chunk)
+                stored_size += len(chunk)
+                continue
+
+            if not truncated:
+                assert output is not None
+                output.close()
+                output = None
+                with path.open("rb") as source:
+                    if stored_size > tail_limit:
+                        source.seek(-tail_limit, os.SEEK_END)
+                    tail.extend(source.read())
+                truncated = True
+
+            tail.extend(chunk)
+            if len(tail) > tail_limit:
+                del tail[:-tail_limit]
+    finally:
+        if output is not None:
+            output.close()
+
+    if truncated:
+        with path.open("wb") as sink:
+            sink.write(_TRUNCATION_MARKER)
+            sink.write(tail[-tail_limit:])
+
+
 class ManagedProcess:
     def __init__(
         self,
@@ -38,8 +114,8 @@ class ManagedProcess:
         process_id: int,
         process: asyncio.subprocess.Process,
         process_group_id: int,
-        stdout_file: TextIO,
-        stderr_file: TextIO,
+        capture_tasks: tuple[asyncio.Task[None], ...],
+        capture_streams: tuple[asyncio.StreamReader, ...],
         started_at: str,
         started_monotonic: float,
         timeout_seconds: float | None,
@@ -50,15 +126,16 @@ class ManagedProcess:
         self.process_id = process_id
         self.process = process
         self.process_group_id = process_group_id
-        self.stdout_file = stdout_file
-        self.stderr_file = stderr_file
+        self.capture_tasks = capture_tasks
+        self.capture_streams = capture_streams
         self.started_at = started_at
         self.started_monotonic = started_monotonic
         self.timeout_seconds = timeout_seconds
         self.terminate_grace_seconds = terminate_grace_seconds
         self.heartbeat_interval = heartbeat_interval
-        self._finished = False
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._finish_lock = asyncio.Lock()
+        self._result: ProcessResult | None = None
 
     @property
     def pid(self) -> int:
@@ -84,23 +161,57 @@ class ManagedProcess:
         except asyncio.CancelledError:
             return
 
+    def _group_exists(self) -> bool:
+        try:
+            os.killpg(self.process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
     async def _terminate_group(self) -> bool:
-        if self.process.returncode is not None:
+        """Terminate every process still in the managed process group.
+
+        The group check deliberately does not rely on the leader PID: a parent can exit while
+        a child remains in the same process group. Such children must not escape merely
+        because ``process.wait()`` has already reaped the leader.
+        """
+        if not self._group_exists():
+            if self.process.returncode is None:
+                await self.process.wait()
             return False
         try:
             os.killpg(self.process_group_id, signal.SIGTERM)
         except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(self.process.wait(), timeout=self.terminate_grace_seconds)
+            if self.process.returncode is None:
+                await self.process.wait()
             return False
-        except asyncio.TimeoutError:
+
+        deadline = time.monotonic() + self.terminate_grace_seconds
+        while time.monotonic() < deadline:
+            if self.process.returncode is None:
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    await asyncio.wait_for(
+                        self.process.wait(), timeout=min(0.02, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            if not self._group_exists():
+                return False
+            await asyncio.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+
+        forced = False
+        if self._group_exists():
             try:
                 os.killpg(self.process_group_id, signal.SIGKILL)
+                forced = True
             except ProcessLookupError:
                 pass
+        if self.process.returncode is None:
             await self.process.wait()
-            return True
+        return forced
 
     async def _finish(
         self,
@@ -110,40 +221,93 @@ class ManagedProcess:
         forced_kill: bool,
         stalled: bool = False,
     ) -> ProcessResult:
-        if self._finished:
-            raise SupervisorError(f"process {self.process_id} has already been finalized")
-        self._finished = True
-        self._heartbeat_task.cancel()
-        await asyncio.gather(self._heartbeat_task, return_exceptions=True)
-        self.stdout_file.close()
-        self.stderr_file.close()
-        ended_at = utc_now()
-        returncode = self.process.returncode
-        if returncode is None:
-            raise SupervisorError("cannot finalize a running process")
-        with self.store._transaction():
-            cursor = self.store._conn.execute(
-                """
-                UPDATE processes
-                SET state=?, ended_at=?, exit_status=?, last_liveness_at=?
-                WHERE process_id=? AND ended_at IS NULL
-                """,
-                (state, ended_at, returncode, ended_at, self.process_id),
+        async with self._finish_lock:
+            if self._result is not None:
+                return self._result
+
+            self._heartbeat_task.cancel()
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
+
+            capture_failed = False
+            if self.capture_tasks:
+                capture_group = asyncio.gather(*self.capture_tasks, return_exceptions=True)
+                try:
+                    outcomes = await asyncio.wait_for(
+                        capture_group, timeout=_CAPTURE_DRAIN_GRACE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    capture_failed = True
+                    for stream in self.capture_streams:
+                        transport = getattr(stream, "_transport", None)
+                        if transport is not None:
+                            transport.close()
+                    for task in self.capture_tasks:
+                        task.cancel()
+                    await asyncio.gather(*self.capture_tasks, return_exceptions=True)
+                else:
+                    capture_failed = any(isinstance(value, BaseException) for value in outcomes)
+
+            ended_at = utc_now()
+            returncode = self.process.returncode
+            if returncode is None:
+                raise SupervisorError("cannot finalize a running process")
+
+            requested_state = state
+            if capture_failed and requested_state == "SUCCEEDED":
+                requested_state = "FAILED"
+
+            final_state = requested_state
+            final_ended_at = ended_at
+            final_exit_status: int | None = returncode
+            durable_was_already_terminal = False
+            with self.store._transaction():
+                cursor = self.store._conn.execute(
+                    """
+                    UPDATE processes
+                    SET state=?, ended_at=?, exit_status=?, last_liveness_at=?
+                    WHERE process_id=? AND ended_at IS NULL
+                    """,
+                    (requested_state, ended_at, returncode, ended_at, self.process_id),
+                )
+                if cursor.rowcount != 1:
+                    row = self.store._conn.execute(
+                        "SELECT state,ended_at,exit_status FROM processes WHERE process_id=?",
+                        (self.process_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise StoreError(f"process {self.process_id} is missing")
+                    if row["ended_at"] is None:
+                        raise StoreError(
+                            f"process {self.process_id} changed without reaching a terminal state"
+                        )
+                    durable_was_already_terminal = True
+                    final_state = row["state"]
+                    final_ended_at = row["ended_at"]
+                    final_exit_status = row["exit_status"]
+                    if final_exit_status is None:
+                        self.store._conn.execute(
+                            """
+                            UPDATE processes SET exit_status=?,last_liveness_at=?
+                            WHERE process_id=? AND ended_at=? AND exit_status IS NULL
+                            """,
+                            (returncode, ended_at, self.process_id, final_ended_at),
+                        )
+                        final_exit_status = returncode
+
+            result = ProcessResult(
+                process_id=self.process_id,
+                pid=self.pid,
+                process_group_id=self.process_group_id,
+                returncode=int(final_exit_status if final_exit_status is not None else returncode),
+                state=final_state,
+                started_at=self.started_at,
+                ended_at=final_ended_at,
+                timed_out=final_state == "TIMED_OUT",
+                forced_kill=(forced_kill if not durable_was_already_terminal else False),
+                stalled=final_state == "STALLED",
             )
-            if cursor.rowcount != 1:
-                raise StoreError(f"process {self.process_id} is already finalized or missing")
-        return ProcessResult(
-            process_id=self.process_id,
-            pid=self.pid,
-            process_group_id=self.process_group_id,
-            returncode=returncode,
-            state=state,
-            started_at=self.started_at,
-            ended_at=ended_at,
-            timed_out=timed_out,
-            forced_kill=forced_kill,
-            stalled=stalled,
-        )
+            self._result = result
+            return result
 
     async def expire_timeout(self) -> ProcessResult:
         if self.timeout_seconds is None:
@@ -168,8 +332,13 @@ class ManagedProcess:
             forced = await self._terminate_group()
             await self._finish("CANCELLED", timed_out=False, forced_kill=forced)
             raise
+
+        # A successfully reaped leader may still have children in its process group. Clean
+        # those descendants before finalizing the stage so normal completion cannot leak an
+        # unmanaged local process or keep inherited stdout/stderr pipes open indefinitely.
+        forced = await self._terminate_group()
         state = "SUCCEEDED" if self.process.returncode == 0 else "FAILED"
-        return await self._finish(state, timed_out=False, forced_kill=False)
+        return await self._finish(state, timed_out=False, forced_kill=forced)
 
     async def terminate(self, *, state: str = "TERMINATED") -> ProcessResult:
         if state not in {"TERMINATED", "STALLED", "CANCELLED"}:
@@ -201,6 +370,7 @@ class SubprocessSupervisor:
         timeout_seconds: float | None = None,
         terminate_grace_seconds: float = 5.0,
         heartbeat_interval: float = 30.0,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> ManagedProcess:
         if not argv or any(not isinstance(item, str) or not item for item in argv):
             raise SupervisorError("argv must contain non-empty strings")
@@ -212,6 +382,11 @@ class SubprocessSupervisor:
             raise SupervisorError("terminate_grace_seconds must be positive")
         if heartbeat_interval <= 0:
             raise SupervisorError("heartbeat_interval must be positive")
+        if isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int):
+            raise SupervisorError("max_output_bytes must be an integer")
+        if max_output_bytes < len(_TRUNCATION_MARKER) + 128:
+            raise SupervisorError("max_output_bytes is too small for bounded tail capture")
+
         workdir = Path(cwd)
         if not workdir.is_dir():
             raise SupervisorError(f"cwd is not a directory: {workdir}")
@@ -219,8 +394,10 @@ class SubprocessSupervisor:
         err_path = Path(stderr_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         err_path.parent.mkdir(parents=True, exist_ok=True)
-        stdout_file = out_path.open("ab", buffering=0)
-        stderr_file = err_path.open("ab", buffering=0)
+        out_path.touch(exist_ok=True)
+        err_path.touch(exist_ok=True)
+        same_output = out_path.resolve() == err_path.resolve()
+
         environment = os.environ.copy()
         environment.update(dict(env_additions or {}))
         started_at = utc_now()
@@ -230,14 +407,45 @@ class SubprocessSupervisor:
                 cwd=str(workdir),
                 env=environment,
                 stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
-                stdout=stdout_file,
-                stderr=stderr_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=(asyncio.subprocess.STDOUT if same_output else asyncio.subprocess.PIPE),
                 start_new_session=True,
             )
         except BaseException:
-            stdout_file.close()
-            stderr_file.close()
             raise
+
+        if process.stdout is None:
+            try:
+                os.killpg(int(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            raise SupervisorError("subprocess stdout pipe was not created")
+
+        capture_streams: list[asyncio.StreamReader] = [process.stdout]
+        capture_tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(
+                _capture_bounded_tail(process.stdout, out_path, max_bytes=max_output_bytes)
+            )
+        ]
+        if not same_output:
+            if process.stderr is None:
+                try:
+                    os.killpg(int(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+                for task in capture_tasks:
+                    task.cancel()
+                await asyncio.gather(*capture_tasks, return_exceptions=True)
+                raise SupervisorError("subprocess stderr pipe was not created")
+            capture_streams.append(process.stderr)
+            capture_tasks.append(
+                asyncio.create_task(
+                    _capture_bounded_tail(process.stderr, err_path, max_bytes=max_output_bytes)
+                )
+            )
+
         started_monotonic = time.monotonic()
         process_group_id = int(process.pid)
         safe_command = redact(list(argv))
@@ -284,12 +492,17 @@ class SubprocessSupervisor:
             except ProcessLookupError:
                 pass
             await process.wait()
-            stdout_file.close()
-            stderr_file.close()
+            await asyncio.gather(*capture_tasks, return_exceptions=True)
             raise
 
         if stdin_text is not None:
             if process.stdin is None:
+                try:
+                    os.killpg(process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+                await asyncio.gather(*capture_tasks, return_exceptions=True)
                 raise SupervisorError("subprocess stdin pipe was not created")
             try:
                 process.stdin.write(stdin_text.encode("utf-8"))
@@ -302,9 +515,8 @@ class SubprocessSupervisor:
                 except ProcessLookupError:
                     pass
                 await process.wait()
+                await asyncio.gather(*capture_tasks, return_exceptions=True)
                 ended_at = utc_now()
-                stdout_file.close()
-                stderr_file.close()
                 with self.store._transaction():
                     self.store._conn.execute(
                         """
@@ -330,8 +542,8 @@ class SubprocessSupervisor:
             process_id=process_id,
             process=process,
             process_group_id=process_group_id,
-            stdout_file=stdout_file,
-            stderr_file=stderr_file,
+            capture_tasks=tuple(capture_tasks),
+            capture_streams=tuple(capture_streams),
             started_at=started_at,
             started_monotonic=started_monotonic,
             timeout_seconds=timeout_seconds,

@@ -8,43 +8,45 @@ In progress: `R26`.
 
 Next bounded unit: `R26` — Final correctness/security review and required demonstration.
 
-Acceptance pending: finish the remaining read-only adversarial review, add the final review/connection documentation and its CI contract, then run the final R26-specific/full/required-scenario/seeded-chaos demonstration before marking the project complete.
+Acceptance pending: close the remaining crash-consistency finding, finish the final review/connection documentation and its CI contract, then run the final R26-specific/full/required-scenario/seeded-chaos demonstration before marking the project complete.
 
-## Latest R26 durable fact — result publication vs cancellation CLOSED
+## Latest R26 durable fact — uncommitted result-file crash residue CONFIRMED RED
 
-The attempt result-publication race is closed with targeted red/green evidence and a green full regression suite.
+The remaining DB/filesystem crash-consistency risk is now demonstrated as a material recovery defect.
 
-Red: test commit `54625a22de269b9e9196de62076d4d3a550d85c6`, GitHub Actions run `34846974177`: FAILED, 164 tests with exactly one error. A real durable cancellation committed immediately after the provider's unfinished precheck; old `ArtifactManager.finalize_attempt()` continued toward result publication and later raised `StoreError: attempt 1 is already finalized`.
+Test commit `8f227322b3229bf02fa1e5d842bfac94d9ab124f` added `FinalAuditProcessTests.test_uncommitted_orphan_result_file_does_not_block_recovery_finalization`. It models the durable state left by a hard process crash after managed `result.json` creation but before the SQLite transaction commits: the attempt row remains unfinished, there is no durable `artifacts(kind='result')` row, but the exclusive managed result path exists with crash residue.
 
-Serialization fix: `932395d60fce186ea8656d9a4acaf5d5087b665e` re-read attempt terminal state under `BEGIN IMMEDIATE` and serialized result-file creation, result-artifact insertion and attempt terminal DB update under the same SQLite writer lock. The targeted cancellation-race test passed, proving cancellation can win without late result publication.
+GitHub Actions run `34847845590`: FAILED, 165 tests in 53.065s with exactly one error, the new orphan-recovery test. `ArtifactManager.finalize_attempt()` obtained the SQLite write transaction, saw the attempt still unfinished, then failed at `result_path.open('x')` with `FileExistsError`. Thus a hard crash at that point can permanently block safe recovery finalization despite SQLite correctly rolling back its transaction.
 
-The first full suite on that fix, run `34847243860`, then found one compatibility regression: the historical write-once artifact contract expected a second ordinary non-cancelled `finalize_attempt()` to raise `FileExistsError`, while the new early terminal check raised `StoreError` instead. That CI fact was checkpointed before repair.
+Required invariant: while holding the SQLite writer lock, an unfinished attempt with no durable result-artifact row may treat an existing managed `result.json` as uncommitted crash residue. A concurrent live finalizer cannot be writing that path at the same time because it would own the same SQLite write lock. Recovery may therefore unlink only that proven orphan path and recreate it. If a durable result-artifact row exists while the attempt is unfinished, fail closed as inconsistent state rather than deleting evidence.
 
-Compatibility fix: `b50313a296eeffb4dd5c99cfbe84f28d54abf20d` preserves both invariants. `CANCELLED` remains a durable winner that returns without publishing provider result evidence; ordinary duplicate finalization preserves the existing immutable-result `FileExistsError` behavior.
+Exact next repair:
 
-Final green: GitHub Actions run `34847495507` on `b50313a296eeffb4dd5c99cfbe84f28d54abf20d`: PASS, 164 tests in 45.452s on Python 3.12.14. Both `test_cancellation_between_precheck_and_result_commit_cannot_publish_late_result` and `ArtifactTests.test_result_is_written_once_and_attempt_cannot_be_refinalized` passed, together with all twelve required deterministic scenarios and the seeded 100-workflow chaos sweep.
+1. In `ArtifactManager.finalize_attempt()`, after the unfinished-attempt re-read under `BEGIN IMMEDIATE`, query whether a durable `result` artifact row already exists for the attempt.
+2. If the managed `result.json` exists and no durable result-artifact row exists, unlink that path under the writer lock as crash residue before exclusive creation.
+3. If a durable result-artifact row exists while the attempt is unfinished, raise/fail closed; do not delete the path.
+4. Preserve all already-green contracts: cancellation wins without late evidence, ordinary duplicate finalized attempts raise historical `FileExistsError`, and successful publication remains write-once.
+5. Run the orphan-recovery test plus cancellation-race and duplicate-finalization tests green; checkpoint the result before any further material work.
+6. Run the full suite before moving to final-review documentation.
+
+## Previous R26 durable fact — cancellation/result publication CLOSED
+
+Final production `b50313a296eeffb4dd5c99cfbe84f28d54abf20d`, GitHub Actions run `34847495507`: PASS, 164 tests in 45.452s. The cancellation/finalization race test and historical duplicate-finalization `FileExistsError` contract both passed, along with all twelve deterministic scenarios and seeded 100-workflow chaos.
 
 ## Other R26 findings already closed
 
-- **Unbounded subprocess logs** — confirmed red; bounded tail capture with continuous pipe draining prevents pipe deadlock and unbounded attempt-log growth.
-- **External cancellation vs in-memory process finalization** — confirmed red; `ManagedProcess.wait()` reconciles already-durable terminal state instead of double-finalizing.
-- **Normal parent exit with inherited child** — remaining same-process-group children are cleaned after leader exit, with leader death separated from pipe EOF.
-- **Operator cancellation after leader exit** — red `34841585992`; group-liveness fix `cd28a8027da1c0b21fa46296995dbf1d7485e349`; green `34845859463`.
-- **Idempotent candidate freeze with stale writer ownership** — exact writer ownership and predecessor/current-generation provenance are required; fixed at `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`.
-- **Stale lease reclaim heartbeat race** — red `34846111400`; atomic revalidation/release fix `af5e606693937400c8fa514a02655c5412b565d9`; green `34846335634`.
-- **Cancellation vs provider result publication** — red `34846974177`; serialized publication plus compatibility fix; green `34847495507`.
-- **Unsafe local shell/destructive Git cleanup** — source audit confirms no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
+- unbounded subprocess logs — bounded tail capture with continuous drain;
+- external cancellation vs in-memory process finalization — durable terminal-state reconciliation;
+- normal parent exit with inherited child — remaining process-group cleanup;
+- operator cancellation after leader exit — red `34841585992`, green `34845859463`;
+- stale writer ownership during idempotent candidate freeze — exact owner/provenance validation;
+- stale lease reclaim heartbeat race — red `34846111400`, green `34846335634`;
+- cancellation vs provider result publication — red `34846974177`, green `34847495507` after compatibility preservation;
+- unsafe local shell/destructive Git cleanup — no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
 
-## Remaining R26 audit scope
+## Remaining R26 scope after this finding
 
-1. Finish a read-only pass across store/evidence/recovery/provider/artifact paths for any additional material duplicate-launch, crash-recovery, stale-provenance, lease-leak, history-loss or secret-leak findings. Any new material finding must enter the red/checkpoint/fix/green loop before production changes.
-2. Explicitly assess crash consistency between SQLite attempt finalization and the managed filesystem result artifact. The current serialization closes concurrent cancellation, but SQLite and the filesystem cannot form one native transaction; determine whether an orphan `result.json` after a process crash requires recovery hardening or can be bounded/documented without violating the product contract.
-3. Document the production-composition boundary. Real Codex/Claude/shadPS4/SSH adapters are individually acceptance-tested, while ordinary top-level `agent-relay run` remains intentionally fail-closed instead of claiming an integrated real-provider pipeline that does not exist.
-4. Add `docs/final-review.md` with findings/dispositions and exact safe Codex/Claude/local-or-SSH shadPS4 connection steps, including shared-storage/artifact-transfer limitations and the current CLI-composition limitation.
-5. Add R26 acceptance so the final-review document and declared limitations cannot silently drift.
-6. Run final R26-specific tests, full `python -m unittest discover -s tests -v`, all twelve deterministic required scenarios and seeded >=100 chaos workflows on the same final production HEAD.
-
-Only after those gates may `R26` move to `DONE`.
+After crash-residue recovery is closed, perform one final read-only pass for additional material findings. If none appear, add `docs/final-review.md` with findings/dispositions and exact safe Codex/Claude/local-or-SSH shadPS4 connection steps. The document must state plainly that real adapters are individually implemented/tested while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than providing an integrated real-provider composition. Add CI acceptance for that boundary and then run the final R26-specific/full/12-scenario/seeded-chaos demonstration on one production HEAD.
 
 ## Development protocol guard
 

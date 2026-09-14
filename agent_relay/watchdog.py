@@ -39,7 +39,8 @@ async def wait_with_file_progress_watchdog(
 
     Process liveness heartbeats deliberately do not count as progress. The watchdog observes
     only the supplied evidence paths, so a process can remain alive while still being judged
-    stalled. No semantic events are emitted by polling.
+    stalled. The managed process's absolute stage-timeout deadline remains authoritative and
+    is checked independently of stall progress. Polling emits no semantic events.
     """
     if stall_timeout_seconds <= 0:
         raise WatchdogError("stall_timeout_seconds must be positive")
@@ -54,12 +55,24 @@ async def wait_with_file_progress_watchdog(
     waiter = asyncio.create_task(process.process.wait())
     try:
         while True:
-            done, _ = await asyncio.wait({waiter}, timeout=poll_interval_seconds)
+            now = time.monotonic()
+            deadline = process.timeout_deadline
+            if deadline is not None and now >= deadline:
+                return await process.expire_timeout()
+
+            wait_seconds = poll_interval_seconds
+            if deadline is not None:
+                wait_seconds = min(wait_seconds, max(0.0, deadline - now))
+            done, _ = await asyncio.wait({waiter}, timeout=wait_seconds)
             if done:
                 return await process.wait()
 
-            current = file_progress_token(paths)
             now = time.monotonic()
+            deadline = process.timeout_deadline
+            if deadline is not None and now >= deadline:
+                return await process.expire_timeout()
+
+            current = file_progress_token(paths)
             if current != token:
                 token = current
                 last_progress = now

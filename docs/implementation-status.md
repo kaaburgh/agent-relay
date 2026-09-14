@@ -2,38 +2,51 @@
 
 ## Current checkpoint
 
-Completed: `R00`, `R01`, `R02`, `R03`, `R04`, `R05`, `R06`, `R07`, `R08`, `R09`, `R10`, `R11`, `R12`, `R13`, `R14`, `R15`, `R16`, `R17`, `R18`, `R19`.
+Completed: `R00`–`R21`.
 
-Next bounded unit: `R20 — Operator CLI and doctor`.
+Next bounded unit: `R22 — Real Claude reviewer adapter/package`.
 
-## R01–R18 summary
+## Through R19
 
-Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision/watchdog cleanup, simulated providers/tools, bounded review/rework, provider retry, persisted resource leases, restart recovery, fail-closed guardrails, and the explicit twelve-scenario deterministic integration matrix are implemented with real temporary Git/SQLite/subprocess semantics.
+Task/config parsing, durable SQLite state/events, workflow invariants, immutable attempts/evidence, managed Git workspaces, real subprocess supervision/watchdog cleanup, simulated providers/tools, bounded review/rework, provider retry, persisted resource leases, restart recovery, fail-closed guardrails, the explicit twelve-scenario deterministic integration matrix, and the seeded 100-workflow chaos/invariant sweep are implemented with real temporary Git/SQLite/subprocess semantics.
 
-## R19 evidence
+## R20 evidence — operator CLI and doctor
 
-Implemented `agent_relay/chaos.py` and `tests/test_chaos.py`.
+Implemented `agent_relay/operator.py`, `agent_relay/execution.py`, and completed `agent_relay/cli.py`; expanded `tests/test_cli.py`.
 
-Chaos/stress guarantees:
+Operator guarantees:
 
-- a seeded plan guarantees at least one execution of every supported injection mode, then fills the remaining workflows from the same deterministic RNG;
-- each workflow owns a fresh tiny real Git repository and SQLite database rather than sharing in-memory mock state;
-- real simulated subprocess modes include happy completion, review/rework, writer crash, provider unavailable/wait/retry, validation failure, incomplete evidence, malformed review, delayed writer result, detached-writer restart recovery, and tool crash;
-- `chaos-report.json` is written before execution and atomically updated after every workflow; a failure records seed, workflow index, injection mode, exception type and message;
-- after every workflow an invariant sweep verifies contiguous candidate generations, current pointer/history agreement, exact candidate provenance for validation/review rows, REVIEW/REWORK preconditions, DONE validation+approval gates, at most one active writer, resource capacity, and one candidate event per frozen generation;
-- seed `20260914` completed exactly 100 workflows and exercised all ten injection modes without invariant failure.
+- `task create` validates and persists both the SQLite task row and a durable human-readable task snapshot;
+- `status` reports workflow stage/attempt, current generation/SHA, live managed processes, last semantic event, current review/validation, provider wait/retry metadata and held leases;
+- `events` reads append-only semantic history with an optional tail limit;
+- `resume` resumes a due `WAITING_PROVIDER` retry but refuses to blindly duplicate ambiguous active-stage ownership;
+- `cancel` terminates active managed process groups before committing durable `CANCELLED` state;
+- `doctor` checks Python/Git/SQLite writability, configured provider executables/auth probes where configured, local/SSH runner prerequisites, resources and optional repository/baseline readiness without printing credentials;
+- `run --simulation` executes the real simulated writer -> validator -> independent reviewer pipeline through `DONE`;
+- ordinary `run` is deliberately fail-closed before a real configured execution backend is installed and leaves a `READY` task unmodified.
 
-Acceptance command:
+First R20 acceptance had one test-only validation-order assertion failure (120/121 tests passed); no production change was needed. The assertion was made order-independent. GitHub Actions run `34830427856` on `9cfd4dbf84b8587004e5df4437a9ae18c638730c`: PASS, 121 tests.
 
-```bash
-python -m unittest discover -s tests -v
-```
+## R21 evidence — Codex writer adapter
 
-GitHub Actions on `718113285e1099ddc92b087e87155a09471da0e4`: PASS, 119 tests in 37.094s on Python 3.12.14. The required 100-workflow chaos test itself completed in about 19.8s inside that run. CI run: `34825130254`.
+Implemented `agent_relay/codex_writer.py`; extended `agent_relay/supervisor.py` with bounded subprocess stdin delivery; added `tests/test_codex_writer.py`; refined artifact credential redaction so known numeric token-usage counters remain observable while credential-shaped token keys remain redacted.
+
+Codex adapter guarantees:
+
+- current non-interactive CLI syntax is isolated in the adapter (`codex exec`, JSONL output, model, reasoning effort, sandbox, approval policy, working directory and optional network/ephemeral settings);
+- the task prompt is delivered over stdin and is not persisted in process argv/command metadata;
+- stdout JSONL parsing requires a `thread.started` session ID and a terminal turn, captures the last completed `agent_message` as handoff, aggregates exposed usage counters and preserves stream errors;
+- obvious rate-limit/quota/temporary-unavailability output is normalized separately from generic process failure;
+- timeout remains a managed-process failure with process-group cleanup;
+- exit zero, valid JSONL and a handoff are still insufficient for success: the writer worktree must contain a clean committed descendant of the exact frozen baseline;
+- exit-zero/no-commit and malformed streams fail closed;
+- attempts preserve command/PID/timestamps/exit/stdout/stderr/thread ID/handoff/usage/candidate evidence.
+
+The first R21 acceptance exposed two product issues: token usage counters were over-redacted because their field names contain `token`, and valid exit-zero JSONL with no candidate was mistakenly accepted after `detect_candidate()` returned `None`. Both are now regression-covered. GitHub Actions run `34831114522` on `511854de14693700b3cd595fcc8e259014fe7f2d`: PASS, 127 tests in 39.461s on Python 3.12.14.
 
 ## Current product state
 
-Simulation/recovery behavior is now covered by deterministic scenario acceptance and reproducible randomized invariant sweeps. The next unit exposes that durable engine to an operator: task create/run/status/events/resume/cancel plus a doctor command that reports prerequisites and configured provider/runtime readiness without printing credentials.
+The durable engine is operator-usable with a real simulation backend, and the first authenticated real-provider boundary (Codex writer) now has a source-verified CLI adapter and deterministic CLI-compatible acceptance coverage. Real end-to-end provider execution remains intentionally incomplete until the independent Claude reviewer adapter is added; the next unit is R22.
 
 ## Durable decisions
 
@@ -43,11 +56,13 @@ Simulation/recovery behavior is now covered by deterministic scenario acceptance
 - SQLite is durable/fail-closed; semantic events and completed validation/review evidence are append-only.
 - Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups with whole-group cleanup and sparse durable liveness metadata.
+- Prompts may be delivered over stdin so large/sensitive task instructions are not copied into process argv metadata.
+- Credential redaction must distinguish secret token material from numeric token-usage telemetry.
+- A provider's successful exit/handoff never substitutes for deterministic Git/evidence acceptance gates.
 - Malformed reviewer output and incomplete deterministic validation evidence block rather than fail open.
 - Correction rounds are bounded and rejected-generation history remains auditable.
 - Resource serialization and restart ownership are durable, never process-local assumptions.
 - Required deterministic scenarios are explicitly named; chaos adds reproducible variation and never replaces deterministic acceptance.
-- Chaos failures must report their seed and exact workflow mode/index so randomized testing remains reproducible.
 - Bloodborne-specific behavior stays outside orchestration core.
 
 ## Handoff protocol

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from agent_relay.artifacts import ArtifactManager
+from agent_relay.git_workspace import record_candidate_generation
 from agent_relay.operator import cancel_task
-from agent_relay.store import Store
+from agent_relay.store import Store, StoreError
 from agent_relay.supervisor import SubprocessSupervisor
 
 
@@ -161,6 +164,95 @@ class FinalAuditProcessTests(unittest.TestCase):
                 self.fail("child process remained live after managed parent exited")
 
         asyncio.run(scenario())
+
+    def test_operator_cancel_kills_group_even_after_leader_dies(self) -> None:
+        async def scenario() -> None:
+            child_pid_file = self.root / "operator-child.pid"
+            child_ready = self.root / "operator-child.ready"
+            layout = self.artifacts.create_attempt(task_id="task-1", kind="tool")
+            child_code = (
+                "import pathlib,signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"pathlib.Path({str(child_ready)!r}).write_text('ready'); "
+                "time.sleep(30)"
+            )
+            parent_code = (
+                "import pathlib,subprocess,sys,time; "
+                f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(p.pid)); "
+                "time.sleep(30)"
+            )
+            handle = await self.supervisor.start(
+                task_id="task-1",
+                attempt_id=layout.attempt.attempt_id,
+                argv=[sys.executable, "-c", parent_code],
+                cwd=self.root,
+                stdout_path=layout.stdout_path,
+                stderr_path=layout.stderr_path,
+                terminate_grace_seconds=0.05,
+                heartbeat_interval=0.02,
+            )
+            for _ in range(200):
+                if child_pid_file.exists() and child_ready.exists():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(child_ready.exists())
+            child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+            try:
+                cancelled = cancel_task(self.store, "task-1", grace_seconds=0.05)
+                self.assertEqual(cancelled["action"], "cancelled")
+                for _ in range(100):
+                    if not _pid_is_live(child_pid):
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("operator cancellation left a process-group child live")
+                self.assertTrue(cancelled["terminated_processes"][0]["sigkill_sent"])
+            finally:
+                if _pid_is_live(child_pid):
+                    try:
+                        os.killpg(handle.process_group_id, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            await asyncio.wait_for(handle.wait(), timeout=2.0)
+
+        asyncio.run(scenario())
+
+    def test_idempotent_candidate_freeze_rejects_stale_writer_ownership(self) -> None:
+        first = self.store.allocate_attempt(task_id="task-1", kind="writer")
+        second = self.store.allocate_attempt(task_id="task-1", kind="writer")
+        sha = "a" * 40
+        frozen = record_candidate_generation(
+            self.store,
+            task_id="task-1",
+            candidate_sha=sha,
+            writer_attempt_id=first.attempt_id,
+            expected_previous_generation=0,
+        )
+        repeated = record_candidate_generation(
+            self.store,
+            task_id="task-1",
+            candidate_sha=sha,
+            writer_attempt_id=first.attempt_id,
+            expected_previous_generation=0,
+        )
+        self.assertEqual(repeated, frozen)
+        with self.assertRaisesRegex(StoreError, "writer attempt"):
+            record_candidate_generation(
+                self.store,
+                task_id="task-1",
+                candidate_sha=sha,
+                writer_attempt_id=second.attempt_id,
+                expected_previous_generation=0,
+            )
+        with self.assertRaisesRegex(StoreError, "stale candidate generation"):
+            record_candidate_generation(
+                self.store,
+                task_id="task-1",
+                candidate_sha=sha,
+                writer_attempt_id=first.attempt_id,
+                expected_previous_generation=1,
+            )
 
     def test_production_source_avoids_local_shell_and_destructive_git_cleanup(self) -> None:
         package_root = Path(__file__).resolve().parents[1] / "agent_relay"

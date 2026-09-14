@@ -33,10 +33,10 @@ Depends on R05,R06. A declarative real-process fake writer supports sleep, file 
 ## R08 — Structured review contract and simulated reviewer — DONE
 Depends on R05,R06. Structured review parsing validates verdicts and severities fail-closed; `REQUEST_CHANGES`/missing-evidence verdicts require findings and multiple valid review objects are rejected as ambiguous. Each simulated review is a fresh real subprocess with a unique invocation ID and immutable attempt, bound before launch to the exact detached candidate worktree SHA/generation. Approve/request-changes, malformed output, provider unavailability, crash/failure and hang/timeout are covered. Malformed output never produces an approval.
 
-## R09 — Generic external-tool model and simulated expensive validator — READY
-Depends on R06. Real supervised fake runtime with incremental `runner-status.json`, `cycles.csv`, `summary.md`, metrics, cycle failure/hang/crash/incomplete evidence/orphan child/SIGTERM/SIGKILL behaviors. Exit zero alone never proves success.
+## R09 — Generic external-tool model and simulated expensive validator — DONE
+Depends on R06. A real supervised fake runtime writes incremental `runner-status.json`, `cycles.csv` and `summary.md` with deterministic metrics. The adapter requires matching run ID, completed N/N status, exactly N ordered successful cycle records and a summary before declaring success; exit zero with incomplete evidence fails closed. Cycle failure/crash, hang, nonzero exit, incremental visibility, orphan child and SIGTERM-ignore/SIGKILL cleanup are covered with real subprocesses.
 
-## R10 — First end-to-end happy path — FUTURE
+## R10 — First end-to-end happy path — READY
 Depends on R03,R07,R08,R09. Simulated writer -> frozen candidate -> validation -> independent review -> DONE with exact-generation provenance and semantic status/events.
 
 ## R11 — REQUEST_CHANGES/rework generations — FUTURE

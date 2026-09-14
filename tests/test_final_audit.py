@@ -177,6 +177,33 @@ class FinalAuditProcessTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(after, before)
 
+    def test_uncommitted_orphan_result_file_does_not_block_recovery_finalization(self) -> None:
+        layout = self.artifacts.create_attempt(task_id="task-1", kind="writer")
+        attempt_id = layout.attempt.attempt_id
+        layout.result_path.write_text('{"partial":"crash residue"}\n', encoding="utf-8")
+        result_rows = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=? AND kind='result'",
+            (attempt_id,),
+        ).fetchone()[0]
+        self.assertEqual(result_rows, 0)
+        self.assertIsNone(self.store.get_attempt(attempt_id).ended_at)
+
+        finished = self.artifacts.finalize_attempt(
+            layout,
+            status="SUCCESS",
+            result={"recovered": True},
+            exit_status=0,
+        )
+
+        self.assertEqual(finished.status, "SUCCESS")
+        self.assertEqual(finished.result, {"recovered": True})
+        self.assertIn('"recovered": true', layout.result_path.read_text(encoding="utf-8").lower())
+        result_rows = self.store._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE attempt_id=? AND kind='result'",
+            (attempt_id,),
+        ).fetchone()[0]
+        self.assertEqual(result_rows, 1)
+
     def test_normal_parent_exit_does_not_leave_unmanaged_child_in_process_group(self) -> None:
         async def scenario() -> None:
             child_pid_file = self.root / "audit-child.pid"

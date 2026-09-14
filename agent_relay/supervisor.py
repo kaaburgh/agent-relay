@@ -26,6 +26,7 @@ class ProcessResult:
     ended_at: str
     timed_out: bool = False
     forced_kill: bool = False
+    stalled: bool = False
 
 
 class ManagedProcess:
@@ -92,7 +93,14 @@ class ManagedProcess:
             await self.process.wait()
             return True
 
-    async def _finish(self, state: str, *, timed_out: bool, forced_kill: bool) -> ProcessResult:
+    async def _finish(
+        self,
+        state: str,
+        *,
+        timed_out: bool,
+        forced_kill: bool,
+        stalled: bool = False,
+    ) -> ProcessResult:
         if self._finished:
             raise SupervisorError(f"process {self.process_id} has already been finalized")
         self._finished = True
@@ -125,6 +133,7 @@ class ManagedProcess:
             ended_at=ended_at,
             timed_out=timed_out,
             forced_kill=forced_kill,
+            stalled=stalled,
         )
 
     async def wait(self) -> ProcessResult:
@@ -144,9 +153,16 @@ class ManagedProcess:
         state = "SUCCEEDED" if self.process.returncode == 0 else "FAILED"
         return await self._finish(state, timed_out=False, forced_kill=False)
 
-    async def terminate(self) -> ProcessResult:
+    async def terminate(self, *, state: str = "TERMINATED") -> ProcessResult:
+        if state not in {"TERMINATED", "STALLED", "CANCELLED"}:
+            raise SupervisorError(f"unsupported explicit termination state: {state}")
         forced = await self._terminate_group()
-        return await self._finish("TERMINATED", timed_out=False, forced_kill=forced)
+        return await self._finish(
+            state,
+            timed_out=False,
+            forced_kill=forced,
+            stalled=state == "STALLED",
+        )
 
 
 class SubprocessSupervisor:

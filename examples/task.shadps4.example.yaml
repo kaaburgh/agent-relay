@@ -1,0 +1,29 @@
+task_id: bloodborne-runtime-example
+repository: /path/to/shadps4/fork
+baseline: main
+writer_instructions: >-
+  Implement the requested shadPS4 change in the managed writer worktree and commit the candidate.
+validation:
+  - name: bloodborne-death-reload
+    runner: gpu-node
+    argv:
+      - python
+      - /configured/path/run_bb_death_reload_benchmark.py
+      - --run-id
+      - "{run_id}"
+      - --cycles
+      - "{requested_cycles}"
+      - --evidence-dir
+      - "{evidence_dir}"
+    cwd: experiments
+    timeout_seconds: 7200
+    resources: [bloodborne-runtime]
+review_instructions: >-
+  Review the exact candidate SHA against deterministic build/runtime evidence and acceptance criteria.
+acceptance_criteria:
+  - requested Bloodborne cycles complete with valid machine-readable evidence
+  - independent review approves the exact validated candidate
+runtime_resources: [bloodborne-runtime]
+max_correction_rounds: 3
+workspace:
+  mode: managed

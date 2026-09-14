@@ -1,0 +1,19 @@
+task_id: simulation-example
+repository: /path/to/local/git/repository
+baseline: main
+writer_instructions: >-
+  Implement the requested change and leave a committed candidate.
+validation:
+  - name: simulated-runtime
+    runner: sim
+    argv: [simulated-validator]
+    timeout_seconds: 30
+review_instructions: >-
+  Independently verify the candidate against the acceptance criteria and deterministic evidence.
+acceptance_criteria:
+  - simulated validation passes for the exact candidate generation
+  - independent simulated review approves the exact candidate
+runtime_resources: []
+max_correction_rounds: 2
+workspace:
+  mode: managed

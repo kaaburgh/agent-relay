@@ -5,11 +5,11 @@ reviewer:
   provider: simulated
   model: fake-reviewer
 runners:
-  local:
+  sim:
     kind: local
-  gpu-node:
-    kind: ssh
-    host: gpu.example.invalid
+    options:
+      simulated_validator: true
+      requested_cycles: 3
 resources:
   bloodborne-runtime:
     capacity: 1

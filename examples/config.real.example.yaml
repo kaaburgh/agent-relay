@@ -1,0 +1,29 @@
+writer:
+  provider: codex
+  executable: codex
+  model: gpt-5.6-luna
+  reasoning_effort: max
+  options:
+    json_flag: --json
+reviewer:
+  provider: claude
+  executable: claude
+  model: opus-5
+  options:
+    permission_mode: plan
+    tools: Read,Grep,Glob
+    max_turns: 20
+runners:
+  local:
+    kind: local
+  gpu-node:
+    kind: ssh
+    host: gpu.example.invalid
+    user: ubuntu
+    base_dir: /srv/agent-relay
+    options:
+      ssh_args: [-p, "22"]
+resources:
+  bloodborne-runtime:
+    capacity: 1
+state_dir: .agent-relay

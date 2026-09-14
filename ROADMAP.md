@@ -78,11 +78,11 @@ Depends on R18,R20. A fresh Claude Code process reviews a dedicated detached wor
 ## R23 — Real shadPS4/Bloodborne tool adapter — DONE
 Depends on R18,R20. External-config adapter for the existing harness normalizes run ID, requested/completed cycles, process exit, runner state, cycle data and summary/evidence without copying the harness FSM into core. Dedicated real-subprocess acceptance covers CSV/JSON success, exact provenance/artifacts, incomplete or mismatched evidence, explicit runner/cycle failure, sequence validation, crash/nonzero, timeout/stall cleanup and pre-attempt argv-template validation.
 
-## R24 — Minimal SSH external-tool runner — IN PROGRESS
-Depends on R23. Keep local/remote execution separable; implement minimal safe SSH argv runner only if it does not destabilize core. No distributed scheduler. Current WIP uses the existing supervised-process boundary, sends a strictly quoted POSIX launch script over SSH stdin, keeps task values out of the local shell/argv, and deliberately does not add artifact transfer or remote orchestration semantics.
+## R24 — Minimal SSH external-tool runner — DONE
+Depends on R23. Local/remote execution remains separable through a minimal SSH transport over the existing supervised-process boundary. Remote argv/cwd/environment values are POSIX-quoted into a `sh -s` script sent over SSH stdin; task-controlled command values never pass through a local shell. Dedicated acceptance executes the generated script with hostile shell-looking arguments, verifies stdout/stderr/nonzero/timeout semantics and validates destination/path inputs. No distributed scheduler, implicit artifact transfer, or remote state machine is introduced.
 
-## R25 — Documentation/example configuration — FUTURE
-Depends on R20,R21,R22,R23. Final architecture/state-machine/providers/simulation/recovery/shadPS4 docs plus credential-free examples and README five-minute simulations.
+## R25 — Documentation/example configuration — IN PROGRESS
+Depends on R20,R21,R22,R23. Final architecture/state-machine/providers/simulation/recovery/shadPS4 docs plus credential-free examples and README five-minute simulations. Current WIP replaces the stale scaffold README, adds all required docs, corrects the simulated CLI example to the real `simulated_validator` contract, adds real-provider/SSH/Bloodborne examples, and introduces a dedicated documentation acceptance test. R25 remains incomplete until that gate and the full regression suite pass.
 
 ## R26 — Final correctness/security review and required demonstration — FUTURE
 Depends on R19,R21,R22,R23,R25. Adversarial review for races, atomicity, duplicate launches, orphan groups, stale provenance, lease leaks, history loss, unsafe Git/shell and unbounded state/logs; fix findings and actually run/report full suite plus all required demonstrations, including >=100 chaos workflows and exact real-provider/runtime connection steps.

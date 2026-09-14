@@ -60,10 +60,10 @@ Depends on R06,R09. Managed processes now distinguish `TIMED_OUT`, `STALLED`, `F
 ## R17 — Review/error guardrails and correction limit — DONE
 Depends on R11,R12,R16. Invalid reviewer output and exit-zero incomplete validation evidence now fail closed into durable `BLOCKED` states with explicit semantic events. A generic review guardrail consumes persisted exact-candidate review/validation evidence, permits only configured rework rounds, emits `correction_limit_reached` when the next request exceeds `max_correction_rounds`, and never creates another generation after blocking. A real multi-round orchestration path proves two `REQUEST_CHANGES` generations followed by fresh approval while preserving distinct attempts/run IDs, feedback inputs, validations and immutable review history.
 
-## R18 — Complete deterministic integration suite — READY
-Depends on R14,R15,R17. All 12 scenarios in `docs/spec.md` run as real integration tests using temporary Git/SQLite/subprocesses and remain reasonably fast.
+## R18 — Complete deterministic integration suite — DONE
+Depends on R14,R15,R17. `tests/test_required_integration_scenarios.py` exposes the twelve product-contract scenarios as twelve named executable acceptance tests. Existing real Git/SQLite/subprocess recovery and guardrail scenarios are deliberately re-executed; provider-unavailable retry now uses an actual simulated writer process before and after `WAITING_PROVIDER`, and capacity-1 contention now proves two actual fake runtime processes cannot overlap. `docs/integration-scenarios.md` maps every required scenario to its acceptance test.
 
-## R19 — Chaos/stress and invariant sweeps — FUTURE
+## R19 — Chaos/stress and invariant sweeps — READY
 Depends on R18. Reproducible randomized failures/restarts/provider waits/reviews/tool failures/delayed results. Required demo executes >=100 workflows with recorded seed and invariants after every run.
 
 ## R20 — Operator CLI and doctor — FUTURE

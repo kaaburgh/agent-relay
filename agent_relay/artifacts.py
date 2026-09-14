@@ -18,6 +18,8 @@ _SAFE_USAGE_COUNTER_KEYS = {
     "input_tokens",
     "cached_input_tokens",
     "cache_write_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
     "output_tokens",
     "reasoning_output_tokens",
     "total_tokens",
@@ -177,7 +179,7 @@ class ArtifactManager:
         ):
             self.store.register_artifact(
                 task_id=task_id,
-                attempt_id=attempt.attempt_id,
+                attempt_id=layout.attempt.attempt_id,
                 kind=artifact_kind,
                 path=str(path.relative_to(self.root)),
             )

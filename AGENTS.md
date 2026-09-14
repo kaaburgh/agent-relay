@@ -31,6 +31,37 @@ Unless the user explicitly requests a single-unit bounded pass:
 8. Create a durable Git checkpoint/commit when permissions allow.
 9. Recover from the new HEAD and continue automatically with the next `READY` unit.
 
+### CI-fact checkpoint rule
+
+Do not wait until the end of a tool window or roadmap unit to persist newly established acceptance facts. Whenever CI or a targeted acceptance run establishes a materially new fact — for example an exact failing test, a newly green fix, a changed blocker, or a newly bounded limitation — update `docs/implementation-status.md` with the tested HEAD, run/test identity, observed result, and exact next action **before** starting another material investigation or production change.
+
+A new CI fact is itself a durable recovery boundary. If the session stops immediately afterward, the repository must already contain enough information for a fresh agent to continue without rereading CI logs merely to discover what failed.
+
+### Pre-fix checkpoint rule
+
+Before applying the next production fix after a red acceptance result, first make the red result durable. At minimum record:
+
+- the exact tested HEAD;
+- the exact failing test/check;
+- the observed failure mode;
+- the production location or invariant implicated, when known;
+- the next intended repair and its acceptance command/test.
+
+Do not stack a second material production fix on top of a newly discovered failure while the only record of that failure exists in transient tool output. A WIP/status-only commit is acceptable and preferred to an unrecoverable gap.
+
+### Adversarial-audit repair loop
+
+For final correctness/security work such as `R26`, use this loop for each material finding:
+
+1. add or identify the targeted adversarial test and demonstrate the defect when practical (`red`);
+2. durably checkpoint the red result;
+3. implement the narrow production fix;
+4. run the targeted test to green;
+5. durably checkpoint the green result and disposition;
+6. only then run the full regression/chaos suite and proceed to the next material finding.
+
+A full-suite run does not replace the targeted red/green evidence. Conversely, a targeted green does not prove the repository is regression-free. Both are required before considering the finding closed.
+
 ### Partial-work rule
 
 If implementation must be committed before acceptance is complete, the commit is a WIP checkpoint, not a completed unit. In the same durable checkpoint (preferably one atomic Git tree commit):
@@ -46,6 +77,7 @@ Do not leave `ROADMAP.md`, `docs/implementation-status.md`, HEAD implementation,
 
 Before ending a tool-execution window, turn, or long work session, run this checklist even if the current unit is incomplete:
 
+- Is every materially new CI/acceptance fact already durable in `docs/implementation-status.md`?
 - Is the unit-specific acceptance test present and has it run?
 - Has the full/relevant regression suite run after the latest production change?
 - Do `ROADMAP.md` and `docs/implementation-status.md` agree on completed, in-progress, and next unit?

@@ -39,10 +39,10 @@ Depends on R06. A real supervised fake runtime writes incremental `runner-status
 ## R10 — First end-to-end happy path — DONE
 Depends on R03,R07,R08,R09. Deterministic orchestration now composes a real simulated writer process, frozen candidate generation, real simulated validator evidence, an independent reviewer process/worktree and the workflow state machine through `DONE`. Validation/review outcomes are persisted in SQLite with exact generation/SHA before state transitions consume them; semantic events expose the full happy-path history.
 
-## R11 — REQUEST_CHANGES/rework generations — READY
-Depends on R10. Findings flow to fresh rework; new commit means new generation; validation/re-review use the new generation; historical reviews remain immutable.
+## R11 — REQUEST_CHANGES/rework generations — DONE
+Depends on R10. A valid generation-1 `REQUEST_CHANGES` is persisted immutably, its structured findings are copied into the immutable inputs of a fresh rework writer attempt, and the writer makes a distinct generation-2 commit. Generation 2 is independently validated and reviewed from a new detached reviewer worktree/invocation before approval. Historical generation-1 validation/review rows remain queryable and DB-level append-only guards reject UPDATE/DELETE.
 
-## R12 — Provider-unavailable wait/retry — FUTURE
+## R12 — Provider-unavailable wait/retry — READY
 Depends on R10. Durable `WAITING_PROVIDER` metadata and bounded/exponential retry without busy-spin; resume same workflow/candidate state.
 
 ## R13 — Generic persisted resource leases — FUTURE

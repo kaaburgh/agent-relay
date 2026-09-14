@@ -10,43 +10,41 @@ Next bounded unit: `R26` — Final correctness/security review and required demo
 
 Acceptance pending: close the remaining adversarial findings, add the final review/connection documentation, then rerun the R26-specific acceptance, full regression suite, all twelve required deterministic scenarios and seeded >=100-workflow chaos demonstration before marking the project complete.
 
-## Latest R26 durable fact — operator process-group cancellation
+## Latest R26 durable fact — process-group cancellation finding CLOSED
 
-Protocol was strengthened at commit `8ed9bf27f456301eee9da2f440e3ab1cf4697807`: every materially new CI fact is now a durable recovery boundary; a red result must be checkpointed before the next production fix; and R26 findings follow an explicit red -> checkpoint -> fix -> targeted green -> checkpoint -> full-suite loop.
+The operator orphan-cancellation defect is now closed. Production commit `cd28a8027da1c0b21fa46296995dbf1d7485e349` changed operator cleanup to make process-group existence authoritative instead of leader-PID liveness. It probes the PGID, sends SIGTERM even if the original leader has already exited while children remain, waits for live group members, and escalates the group to SIGKILL after grace. Linux `/proc` state is used to avoid treating zombie-only groups as live work.
 
-The latest production HEAD before that protocol-only commit was `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1` (`R26: bind idempotent candidate freeze to exact writer ownership`). GitHub Actions run `34841585992` executed 162 tests and failed exactly one:
+GitHub Actions run `34845859463` on `cd28a8027da1c0b21fa46296995dbf1d7485e349`: PASS, 162 tests in 43.969s on Python 3.12.14. The previously red `test_final_audit.FinalAuditProcessTests.test_operator_cancel_kills_group_even_after_leader_dies` passed, together with all twelve required deterministic scenarios and the seeded 100-workflow chaos sweep.
 
-`test_final_audit.FinalAuditProcessTests.test_operator_cancel_kills_group_even_after_leader_dies`
+The red predecessor was run `34841585992` on `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`, where exactly that test failed because a SIGTERM-ignoring same-PGID child survived after leader exit. The red/green pair is now durable evidence for this finding.
 
-Observed failure: `operator.cancel_task()` sends SIGTERM to the stored process group but `_terminate_process_group()` decides whether cleanup is complete by checking only the original leader PID. If the leader exits while a same-PGID child ignores SIGTERM, the function returns before escalating the still-existing process group to SIGKILL. The adversarial test leaves that child live and fails with `operator cancellation left a process-group child live`.
+## Next R26 finding — stale lease reclaim TOCTOU
 
-Implication: operator-side cleanup must track process-group existence, not leader-PID liveness. The intended narrow repair is to probe the PGID directly (for example `os.killpg(group, 0)` with appropriate `ProcessLookupError` handling), send SIGTERM even when the leader PID is already dead but the group still exists, wait for the group to disappear, and escalate the group to SIGKILL after the configured grace period. The existing targeted test is the acceptance gate for this repair.
+The next material finding is `agent_relay/resource_leases.py::reclaim_stale_leases()`. Current code takes an `active_leases()` snapshot, decides a heartbeat is stale and checks for a RUNNING process, then later calls `release_lease()` in a separate transaction. A holder can refresh its heartbeat between the stale snapshot and the release transaction, yet the stale reclaim can still release the now-live lease.
 
-Exact next action:
+Exact next action, before any production fix:
 
-1. Fix `agent_relay/operator.py::_terminate_process_group()` to make PGID existence authoritative for group cleanup.
-2. Run the targeted orphan-cancellation regression to green.
-3. Checkpoint that green result in this file before the full suite or another material fix.
-4. Run the full suite after the cancellation repair.
-5. Then address the already identified stale-lease reclaim TOCTOU: `reclaim_stale_leases()` currently performs stale-heartbeat/process-state observation before a separate release transaction, so the reclaim decision must be revalidated atomically under the write transaction.
-6. Continue the remaining R26 audit and final demonstration only after those findings are individually closed.
+1. Add an adversarial lease test that injects a real `heartbeat_lease()` database update after `active_leases()` returns the stale snapshot but before reclaim releases it. The expected invariant is that a freshly heartbeated lease remains active and is not returned as reclaimed.
+2. Demonstrate that test red against the current implementation and checkpoint the exact run/result.
+3. Repair `reclaim_stale_leases()` so each candidate's current heartbeat, active ownership and absence of a durable RUNNING process are revalidated atomically under the SQLite write transaction immediately before the release/event write.
+4. Run the same targeted test green and checkpoint it before continuing the remaining audit.
+5. Then run the full suite before opening another material finding.
 
 ## R26 findings already closed
-
-The final adversarial audit has already converted several risks into executable tests and fixes:
 
 - **Unbounded subprocess logs** — confirmed red, then fixed with bounded tail capture and continuous pipe draining so noisy children cannot fill a pipe or grow attempt logs without bound.
 - **External cancellation vs in-memory finalization race** — confirmed red, then fixed so `ManagedProcess.wait()` reconciles an already-durable terminal state instead of double-finalizing and raising `StoreError`.
 - **Late provider result after cancellation** — a durably cancelled attempt rejects late result finalization/history pollution.
-- **Normal parent exit with inherited child process** — fixed so parent completion does not leave an unmanaged same-group child alive; the supervisor separates leader death from pipe EOF and cleans the remaining group.
+- **Normal parent exit with inherited child process** — fixed so parent completion does not leave an unmanaged same-group child alive; leader death is separated from pipe EOF and the remaining group is cleaned.
+- **Operator cancellation after leader exit** — red in `34841585992`, green in `34845859463`; surviving same-group children are now escalated independently of leader PID.
 - **Idempotent candidate freeze with stale writer ownership** — confirmed red and fixed at `e81b04d3a3893ae25d09d7f08679deb2ebb1c2d1`; repeating the same candidate SHA is idempotent only when writer ownership and predecessor/current-generation provenance agree.
 - **Unsafe local shell/destructive Git cleanup** — source audit test confirms no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
 
-A previous green checkpoint for the first group of fixes was GitHub Actions run `34841275810` on `b08f7bf1...`: 160 tests PASS, including bounded logs, cancellation reconciliation, orphan cleanup after normal parent exit, required scenarios and the seeded 100-workflow chaos sweep.
+A previous green checkpoint for the first group of fixes was GitHub Actions run `34841275810` on `b08f7bf1...`: 160 tests PASS.
 
 ## Remaining R26 audit scope
 
-After the operator process-group repair and lease-reclaim atomicity fix, R26 must still:
+After lease-reclaim atomicity is closed, R26 must still:
 
 - review remaining store/evidence/recovery/provider paths for duplicate launch, stale provenance, lease leak, history loss and secret leakage;
 - decide and document the production-composition boundary: real Codex/Claude/shadPS4/SSH adapters are individually acceptance-tested, while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than claiming an unimplemented production composition;
@@ -55,30 +53,15 @@ After the operator process-group repair and lease-reclaim atomicity fix, R26 mus
 
 Only after those gates may `R26` move to `DONE`.
 
-## R25 acceptance — documentation/example configuration
-
-R25 replaced the stale scaffold README; added architecture/state-machine/providers/simulation/recovery/shadPS4 docs; corrected the simulated CLI config to the real `options.simulated_validator: true` contract; and added credential-free Codex/Claude/SSH/Bloodborne examples plus documentation acceptance tests.
-
-Final R25 acceptance: GitHub Actions run `34840078585` on `126f618e044a1166d3f5ddab0e0bd818f42c7b38`: PASS, 155 tests on Python 3.12.14, including the seeded 100-workflow chaos regression.
-
-## R24 acceptance — minimal SSH external-tool transport
-
-Final R24 acceptance: GitHub Actions run `34836178935` on `a0b4e69abf7f8a7d0ef3f9376cd22f5a3bf008f9`: PASS, 150 tests. The dedicated test executes the generated remote script through real `/bin/sh -s` with shell-looking arguments/environment values and verifies they remain literal. Remote artifact transfer and arbitrary detached-remote-process cleanup remain explicit non-guarantees.
-
-## R23 acceptance — real shadPS4/Bloodborne tool adapter
-
-Final R23 acceptance: GitHub Actions run `34835209968` on `e4b882864cc1b84c3ccbca4c0f5ce5cb026b9d27`: PASS, 143 tests. The dedicated gate previously caught and fixed incomplete-cycle evidence being misclassified as deterministic validation failure.
-
 ## Development protocol guard
 
-Development status is machine-checked and CI facts are now checkpointed incrementally:
+Protocol was strengthened at `8ed9bf27f456301eee9da2f440e3ab1cf4697807`:
 
-- a partially landed unit is `IN PROGRESS` rather than implicitly complete;
+- every materially new CI fact is a durable recovery boundary;
+- red results are checkpointed before production repair;
+- R26 findings use red -> durable checkpoint -> fix -> targeted green -> durable checkpoint -> full-suite progression;
+- a partially landed unit remains `IN PROGRESS`;
 - a full regression suite does not replace unit-specific acceptance evidence;
-- every materially new CI/acceptance fact is persisted before the next material investigation/fix;
-- a red result is made durable before its production repair begins;
-- R26 findings use targeted red/green evidence plus a later full regression gate;
-- roadmap/status transitions prefer atomic Git tree commits;
 - `tests/test_project_status.py` makes roadmap/handoff drift a CI failure.
 
 ## Durable decisions
@@ -89,7 +72,6 @@ Development status is machine-checked and CI facts are now checkpointed incremen
 - Existing user checkouts are never cleaned/reset automatically; mutations happen in dedicated managed worktrees.
 - Managed subprocesses use independent process groups; cleanup is a group-level invariant rather than a leader-PID assumption.
 - Provider/tool process success never substitutes for deterministic Git/evidence acceptance gates.
-- Malformed reviewer output and incomplete deterministic validation evidence block rather than fail open.
 - Resource serialization and restart ownership are durable, never process-local assumptions.
 - Required deterministic scenarios are explicit; chaos adds reproducible variation and never replaces deterministic acceptance.
 - Bloodborne-specific behavior stays outside orchestration core.

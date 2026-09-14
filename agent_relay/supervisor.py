@@ -19,6 +19,7 @@ class SupervisorError(RuntimeError):
 DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 _TRUNCATION_MARKER = b"[agent-relay: earlier output truncated; retaining tail]\n"
 _CAPTURE_DRAIN_GRACE_SECONDS = 1.0
+_LEADER_REAP_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -41,14 +42,7 @@ async def _capture_bounded_tail(
     *,
     max_bytes: int,
 ) -> None:
-    """Continuously drain a subprocess stream while bounding durable log growth.
-
-    Output is appended normally until the configured limit would be crossed. From that
-    point on, the file remains bounded while an in-memory tail of at most ``max_bytes`` is
-    retained. At EOF the file is replaced by an explicit truncation marker plus the tail.
-    The bounded reader keeps draining even after truncation so a noisy child cannot block on
-    a full OS pipe.
-    """
+    """Continuously drain a subprocess stream while bounding durable log growth."""
     tail_limit = max_bytes - len(_TRUNCATION_MARKER)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
@@ -161,6 +155,23 @@ class ManagedProcess:
         except asyncio.CancelledError:
             return
 
+    async def _wait_for_leader_exit(self, deadline: float | None = None) -> bool:
+        """Observe leader exit without waiting for inherited stdout/stderr pipes to close.
+
+        asyncio's Process.wait() can remain pending after the direct child exits when one of
+        its descendants inherited a PIPE fd. ``returncode`` is set by the child watcher as
+        soon as the direct child exits, so it is the correct liveness signal for the leader.
+        """
+        while self.process.returncode is None:
+            if deadline is None:
+                await asyncio.sleep(0.01)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.01, remaining))
+        return True
+
     def _group_exists(self) -> bool:
         try:
             os.killpg(self.process_group_id, 0)
@@ -171,34 +182,33 @@ class ManagedProcess:
         return True
 
     async def _terminate_group(self) -> bool:
-        """Terminate every process still in the managed process group.
-
-        The group check deliberately does not rely on the leader PID: a parent can exit while
-        a child remains in the same process group. Such children must not escape merely
-        because ``process.wait()`` has already reaped the leader.
-        """
+        """Terminate every process still in the managed process group."""
         if not self._group_exists():
             if self.process.returncode is None:
-                await self.process.wait()
+                exited = await self._wait_for_leader_exit(
+                    time.monotonic() + _LEADER_REAP_GRACE_SECONDS
+                )
+                if not exited:
+                    raise SupervisorError("process group vanished but leader exit was not observed")
             return False
         try:
             os.killpg(self.process_group_id, signal.SIGTERM)
         except ProcessLookupError:
             if self.process.returncode is None:
-                await self.process.wait()
+                exited = await self._wait_for_leader_exit(
+                    time.monotonic() + _LEADER_REAP_GRACE_SECONDS
+                )
+                if not exited:
+                    raise SupervisorError("process group vanished but leader exit was not observed")
             return False
 
         deadline = time.monotonic() + self.terminate_grace_seconds
         while time.monotonic() < deadline:
-            if self.process.returncode is None:
-                remaining = max(0.0, deadline - time.monotonic())
-                try:
-                    await asyncio.wait_for(
-                        self.process.wait(), timeout=min(0.02, remaining)
-                    )
-                except asyncio.TimeoutError:
-                    pass
             if not self._group_exists():
+                if self.process.returncode is None:
+                    await self._wait_for_leader_exit(
+                        time.monotonic() + _LEADER_REAP_GRACE_SECONDS
+                    )
                 return False
             await asyncio.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
 
@@ -210,7 +220,11 @@ class ManagedProcess:
             except ProcessLookupError:
                 pass
         if self.process.returncode is None:
-            await self.process.wait()
+            exited = await self._wait_for_leader_exit(
+                time.monotonic() + _LEADER_REAP_GRACE_SECONDS
+            )
+            if not exited:
+                raise SupervisorError("leader did not exit after process-group termination")
         return forced
 
     async def _finish(
@@ -318,24 +332,16 @@ class ManagedProcess:
     async def wait(self) -> ProcessResult:
         try:
             deadline = self.timeout_deadline
-            if deadline is None:
-                await self.process.wait()
-            else:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return await self.expire_timeout()
-                try:
-                    await asyncio.wait_for(self.process.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    return await self.expire_timeout()
+            exited = await self._wait_for_leader_exit(deadline)
+            if not exited:
+                return await self.expire_timeout()
         except asyncio.CancelledError:
             forced = await self._terminate_group()
             await self._finish("CANCELLED", timed_out=False, forced_kill=forced)
             raise
 
-        # A successfully reaped leader may still have children in its process group. Clean
-        # those descendants before finalizing the stage so normal completion cannot leak an
-        # unmanaged local process or keep inherited stdout/stderr pipes open indefinitely.
+        # The direct child is gone, but descendants may still hold process-group membership
+        # and inherited pipe descriptors. Clean them before draining/finalizing evidence.
         forced = await self._terminate_group()
         state = "SUCCEEDED" if self.process.returncode == 0 else "FAILED"
         return await self._finish(state, timed_out=False, forced_kill=forced)
@@ -401,18 +407,15 @@ class SubprocessSupervisor:
         environment = os.environ.copy()
         environment.update(dict(env_additions or {}))
         started_at = utc_now()
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(workdir),
-                env=environment,
-                stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=(asyncio.subprocess.STDOUT if same_output else asyncio.subprocess.PIPE),
-                start_new_session=True,
-            )
-        except BaseException:
-            raise
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(workdir),
+            env=environment,
+            stdin=(asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=(asyncio.subprocess.STDOUT if same_output else asyncio.subprocess.PIPE),
+            start_new_session=True,
+        )
 
         if process.stdout is None:
             try:

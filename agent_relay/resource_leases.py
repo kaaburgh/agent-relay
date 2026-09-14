@@ -230,31 +230,63 @@ def reclaim_stale_leases(
     instant = now or datetime.now(timezone.utc)
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
-    cutoff = instant.astimezone(timezone.utc) - stale_after
+    instant = instant.astimezone(timezone.utc)
+    cutoff = instant - stale_after
+    timestamp = _iso(instant)
+
     candidates = active_leases(store)
     released: list[ResourceLease] = []
-    for lease in candidates:
-        if _parse(lease.heartbeat_at) > cutoff:
+    for candidate in candidates:
+        if _parse(candidate.heartbeat_at) > cutoff:
             continue
-        if lease.attempt_id is None:
+        if candidate.attempt_id is None:
             continue
-        running = store._conn.execute(
-            """
-            SELECT 1 FROM processes
-            WHERE attempt_id=? AND state='RUNNING'
-            LIMIT 1
-            """,
-            (lease.attempt_id,),
-        ).fetchone()
-        if running is not None:
-            continue
-        released.append(
-            release_lease(
-                store,
-                lease_id=lease.lease_id,
-                holder_id=lease.holder_id,
-                now=instant,
-                recovered=True,
+
+        reclaimed: ResourceLease | None = None
+        with store._transaction():
+            row = store._conn.execute(
+                "SELECT * FROM leases WHERE lease_id=?", (candidate.lease_id,)
+            ).fetchone()
+            if row is None or row["released_at"] is not None:
+                continue
+            if _parse(row["heartbeat_at"]) > cutoff:
+                continue
+            attempt_id = row["attempt_id"]
+            if attempt_id is None:
+                continue
+            running = store._conn.execute(
+                """
+                SELECT 1 FROM processes
+                WHERE attempt_id=? AND state='RUNNING'
+                LIMIT 1
+                """,
+                (attempt_id,),
+            ).fetchone()
+            if running is not None:
+                continue
+            cursor = store._conn.execute(
+                "UPDATE leases SET released_at=? WHERE lease_id=? AND released_at IS NULL",
+                (timestamp, candidate.lease_id),
             )
-        )
+            if cursor.rowcount != 1:
+                raise StoreError("lease changed before stale reclaim commit")
+            store._insert_event(
+                task_id=row["task_id"],
+                event_type="resource_released",
+                stage=None,
+                generation=None,
+                payload={
+                    "lease_id": candidate.lease_id,
+                    "resource": row["resource_name"],
+                    "holder_id": row["holder_id"],
+                    "recovered": True,
+                },
+                created_at=timestamp,
+            )
+            released_row = store._conn.execute(
+                "SELECT * FROM leases WHERE lease_id=?", (candidate.lease_id,)
+            ).fetchone()
+            reclaimed = _lease(released_row)
+        if reclaimed is not None:
+            released.append(reclaimed)
     return tuple(released)

@@ -235,10 +235,36 @@ class ArtifactManager:
                     else:
                         _raise_already_finalized(layout, layout.attempt.attempt_id)
                 else:
+                    durable_result = self.store._conn.execute(
+                        """
+                        SELECT artifact_id FROM artifacts
+                        WHERE attempt_id=? AND kind='result'
+                        LIMIT 1
+                        """,
+                        (layout.attempt.attempt_id,),
+                    ).fetchone()
+                    if durable_result is not None:
+                        raise StoreError(
+                            f"unfinished attempt {layout.attempt.attempt_id} has a durable result artifact"
+                        )
+                    if layout.result_path.exists() or layout.result_path.is_symlink():
+                        # All finalizers must hold this same SQLite writer lock before creating
+                        # the managed result path. Therefore an existing path with an unfinished
+                        # attempt and no durable result-artifact row cannot belong to a concurrent
+                        # live finalizer; it is residue from a process crash/rollback. unlink()
+                        # removes a symlink itself rather than following its target.
+                        try:
+                            layout.result_path.unlink()
+                        except OSError as exc:
+                            raise ArtifactError(
+                                f"cannot remove uncommitted result residue for attempt {layout.attempt.attempt_id}: {exc}"
+                            ) from exc
+
                     # The filesystem cannot participate in SQLite's transaction. Create the
                     # immutable result while holding the write lock and remove only our newly
-                    # created file if a later DB operation rolls back. A process crash can still
-                    # leave an orphan file, but it cannot publish a conflicting durable DB row.
+                    # created file if a later DB operation rolls back. On a hard process crash,
+                    # the next finalizer recognizes that uncommitted residue using the durable
+                    # attempt/artifact state checked above.
                     with layout.result_path.open("x", encoding="utf-8", newline="\n") as stream:
                         created_result_file = True
                         json.dump(safe_result, stream, indent=2, sort_keys=True, ensure_ascii=False)

@@ -63,14 +63,18 @@ class SimulatedWriterProvider:
         baseline_sha: str,
         behavior: Sequence[Mapping[str, Any]],
         generation: int | None = None,
+        feedback: Sequence[Mapping[str, Any]] | None = None,
         timeout_seconds: float | None = None,
     ) -> SimulatedWriterInvocation:
         worktree = Path(writer_worktree)
+        inputs: dict[str, Any] = {"behavior": list(behavior), "baseline_sha": baseline_sha}
+        if feedback is not None:
+            inputs["review_feedback"] = [dict(item) for item in feedback]
         layout = self.artifacts.create_attempt(
             task_id=task_id,
             kind="writer",
             generation=generation,
-            inputs={"behavior": list(behavior), "baseline_sha": baseline_sha},
+            inputs=inputs,
             command=["simulated-writer"],
         )
         script_path = layout.directory / "writer-behavior.json"

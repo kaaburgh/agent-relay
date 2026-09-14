@@ -8,23 +8,25 @@ In progress: `R26`.
 
 Next bounded unit: `R26` — Final correctness/security review and required demonstration.
 
-Acceptance pending: production audit is frozen after the final confirmed recovery fix; add `docs/final-review.md` plus CI acceptance for its documented boundaries/connection steps, then run the final R26-specific/full/required-scenario/seeded-chaos demonstration on one production HEAD before marking the project complete.
+Acceptance pending: the final production/documentation gate is green. The only remaining work is an atomic roadmap/handoff closeout marking R26 DONE, followed by a metadata-consistency CI verification.
 
-## Latest R26 durable fact — JSON validation recovery gap CLOSED GREEN
+## Latest R26 durable fact — FINAL PRODUCT + DOCUMENTATION GATE GREEN
 
-Production HEAD `3a79fe1571a1522afffd88a2ac2b9de58a6d32a2`, GitHub Actions run `34858291629`: PASS, 167 tests in 53.786s.
+Accepted HEAD `a9668502dda6f1f2094dd3b13bb8620de3c020f1`, GitHub Actions run `34858958981`: PASS, 169 tests in 44.090s.
 
-`R26ValidatorRecoveryJsonTests.test_completed_json_validation_evidence_recovers_without_rerun` is green. Durable validator recovery now reads either `cycles.csv` or `cycles.json`, accepts the same canonical success-state/status aliases used by the real shadPS4 boundary, verifies exact requested/completed counts and ordered cycle identifiers when present, requires explicit per-cycle success proof, registers the actual cycle-evidence path, reuses the existing attempt and releases the held runtime lease. Incomplete or malformed evidence remains `AMBIGUOUS` and retains its lease.
+This gate includes `docs/final-review.md`, its executable documentation acceptance tests and the README link. Both `FinalReviewDocumentationTests` passed, proving the final review continues to disclose the intentionally fail-closed ordinary real `agent-relay run` boundary, maps all twelve required deterministic demonstrations plus the seeded chaos sweep, and documents exact safe connection steps/boundaries for Codex, Claude, local shadPS4 and SSH-transported shadPS4.
 
-Red evidence remains GitHub Actions run `34858018738` on `dc068c89a4424a1b73614426680b570e45afb766`: 167 tests in 45.746s with exactly one failure, where a complete successful `cycles.json` run returned `AMBIGUOUS` instead of `RECOVERED`.
+The same run passed the complete suite, including:
 
-The green run also passed existing CSV validator recovery tests, all shadPS4 adapter tests, all twelve deterministic integration scenarios and the seeded 100-workflow chaos sweep.
+- all R26 adversarial regressions: process-group/cancellation races, lease reclaim TOCTOU, result publication/crash residue, missing per-cycle success evidence and CSV/JSON recovery;
+- all twelve `RequiredIntegrationScenarios` (`s01`–`s12`);
+- `ChaosIntegrationTests.test_reproducible_100_workflow_chaos_sweep`: exactly 100 workflows with seed `20260914`;
+- all real-adapter contract tests for Codex, Claude, shadPS4 and SSH;
+- project-status protocol consistency tests.
 
-## Previous R26 durable fact — per-cycle success evidence fail-open CLOSED GREEN
+No material production-code finding remains open. `docs/final-review.md` is the completed Definition-of-Done handoff for the implemented scope and states the known limitation precisely: real adapters are individually implemented/tested, while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than presenting a fake integrated real-provider composition.
 
-Production HEAD `5ab31b3469f5c4d427c427ff3ef8fd2bb9a00faa`, GitHub Actions run `34857598533`: PASS, 166 tests in 44.196s.
-
-`ShadPS4BloodborneValidator._cycle_failure()` requires every cycle record to contain a non-empty `status`, `result`, or `outcome`. Missing per-cycle success proof is `INCOMPLETE_EVIDENCE`; explicit known failure statuses remain `VALIDATION_FAILED`.
+Exact next action: atomically change `ROADMAP.md` R26 from `IN PROGRESS` to `DONE` and this handoff to Completed `R00`–`R26` with no current bounded unit, without changing production code. Then require the metadata-only closeout HEAD to pass CI/project-status consistency before declaring the roadmap complete.
 
 ## R26 findings closed by the adversarial audit
 
@@ -39,16 +41,6 @@ Production HEAD `5ab31b3469f5c4d427c427ff3ef8fd2bb9a00faa`, GitHub Actions run `
 - missing per-cycle success evidence — red `34857262874`, green `34857598533`;
 - CSV/JSON validation recovery mismatch — red `34858018738`, green `34858291629`;
 - unsafe local shell/destructive Git cleanup — no production `shell=True`, automatic `git reset --hard`, or `git clean` path.
-
-## Audit conclusion and remaining R26 scope
-
-The bounded production-code adversarial audit is now frozen. No additional material production finding remains open from the required R26 categories. The remaining work is acceptance/documentation only:
-
-1. add `docs/final-review.md` with findings/dispositions, architecture/state/schema/provider/recovery summary, known limitations and exact safe Codex/Claude/local-or-SSH shadPS4 connection steps;
-2. explicitly state that real adapters are individually implemented/tested while ordinary top-level `agent-relay run` remains intentionally fail-closed rather than providing an integrated real-provider composition;
-3. add CI acceptance for those documented boundaries and required demonstration mapping;
-4. run one final R26 production/documentation HEAD through the R26-specific tests, full suite, all twelve deterministic scenarios and seeded >=100 chaos workflows;
-5. if green, atomically mark `R26` DONE and synchronize `ROADMAP.md` / this handoff, then verify final metadata CI.
 
 ## Development protocol guard
 

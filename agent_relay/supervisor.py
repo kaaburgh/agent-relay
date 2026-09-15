@@ -11,9 +11,10 @@ from typing import Mapping, Sequence
 
 from .artifacts import redact
 from .runtime_safety import (
+    authorize_launch_claim_in_transaction,
     capture_process_identity,
     claim_attempt_launch,
-    clear_launch_claim_in_transaction,
+    clear_launch_claim_for_process_in_transaction,
     ensure_runtime_safety_guards,
     persist_process_identity,
     release_attempt_launch_claim,
@@ -315,6 +316,9 @@ class ManagedProcess:
                             (returncode, ended_at, self.process_id, final_ended_at),
                         )
                         final_exit_status = returncode
+                clear_launch_claim_for_process_in_transaction(
+                    self.store, process_id=self.process_id
+                )
 
             result = ProcessResult(
                 process_id=self.process_id,
@@ -404,6 +408,9 @@ class SubprocessSupervisor:
                     """,
                     (status, ended_at, process.returncode, attempt_id),
                 )
+            clear_launch_claim_for_process_in_transaction(
+                self.store, process_id=process_id
+            )
 
     async def start(
         self,
@@ -465,6 +472,10 @@ class SubprocessSupervisor:
                 "agent_relay.launch_gate",
                 "--gate-fd",
                 str(gate_read_fd),
+                "--state-db",
+                str(self.store.path.resolve()),
+                "--attempt-id",
+                str(attempt_id),
                 "--",
                 *argv,
             )
@@ -582,6 +593,9 @@ class SubprocessSupervisor:
                     self.store, process_id=process_id, identity=identity
                 )
                 if attempt_id is not None:
+                    authorize_launch_claim_in_transaction(
+                        self.store, attempt_id=attempt_id
+                    )
                     updated = self.store._conn.execute(
                         """
                         UPDATE attempts SET pid=?, status='RUNNING'
@@ -591,7 +605,6 @@ class SubprocessSupervisor:
                     )
                     if updated.rowcount != 1:
                         raise StoreError("attempt changed before process publication")
-                    clear_launch_claim_in_transaction(self.store, attempt_id=attempt_id)
         except BaseException:
             if gate_write_fd is not None:
                 try:

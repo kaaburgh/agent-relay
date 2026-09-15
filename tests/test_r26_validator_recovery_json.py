@@ -70,6 +70,12 @@ class R26ValidatorRecoveryJsonTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (evidence_dir / "summary.md").write_text("completed 3/3\n", encoding="utf-8")
+            # R26's JSON-format guarantee remains valid, but recovery now also requires the
+            # child-owned terminal exit checkpoint introduced by the #17 fix.
+            (layout.directory / "process-exit.json").write_text(
+                json.dumps({"run_id": run_id, "exit_status": 0}) + "\n",
+                encoding="utf-8",
+            )
 
             configure_resource(store, "bloodborne-runtime", 1)
             lease = acquire_lease(
@@ -105,6 +111,11 @@ class R26ValidatorRecoveryJsonTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(cycles_artifact)
             self.assertTrue(cycles_artifact["path"].endswith("cycles.json"))
+            exit_artifact = store._conn.execute(
+                "SELECT path FROM artifacts WHERE attempt_id=? AND kind='process_exit'",
+                (layout.attempt.attempt_id,),
+            ).fetchone()
+            self.assertIsNotNone(exit_artifact)
         finally:
             store.close()
 

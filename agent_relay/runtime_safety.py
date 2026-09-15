@@ -164,41 +164,6 @@ def pid_matches_identity(pid: int, *, boot_id: str, start_time_ticks: int) -> bo
     return state != "Z" and observed_start == start_time_ticks
 
 
-def _assert_attempt_stage_compatible(
-    *,
-    task_stage: str,
-    task_generation: int,
-    attempt_kind: str,
-    attempt_generation: int | None,
-) -> None:
-    """Reject stale built-in attempts before they can acquire side-effecting ownership."""
-    if attempt_kind == "writer":
-        if task_stage == "WORK":
-            if task_generation != 0 or attempt_generation is not None:
-                raise RuntimeSafetyError("initial writer attempt does not match WORK generation")
-            return
-        if task_stage == "REWORK":
-            if task_generation <= 0 or attempt_generation != task_generation:
-                raise RuntimeSafetyError("rework writer attempt does not match current generation")
-            return
-        raise RuntimeSafetyError(f"writer attempt cannot launch while task is {task_stage}")
-
-    if attempt_kind == "validation":
-        if task_stage != "VALIDATE":
-            raise RuntimeSafetyError(
-                f"validation attempt cannot launch while task is {task_stage}"
-            )
-        if task_generation <= 0 or attempt_generation != task_generation:
-            raise RuntimeSafetyError("validation attempt does not match current generation")
-        return
-
-    if attempt_kind == "reviewer":
-        if task_stage != "REVIEW":
-            raise RuntimeSafetyError(f"reviewer attempt cannot launch while task is {task_stage}")
-        if task_generation <= 0 or attempt_generation != task_generation:
-            raise RuntimeSafetyError("reviewer attempt does not match current generation")
-
-
 def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None:
     """Durably claim one attempt before any side-effecting command can exec."""
     owner = capture_process_identity(os.getpid())
@@ -210,7 +175,7 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
         if task is None:
             raise RuntimeSafetyError(f"unknown task: {task_id}")
         attempt = store._conn.execute(
-            "SELECT task_id,kind,generation,status,ended_at FROM attempts WHERE attempt_id=?",
+            "SELECT task_id,kind,generation,status,ended_at,started_at FROM attempts WHERE attempt_id=?",
             (attempt_id,),
         ).fetchone()
         if attempt is None or attempt["task_id"] != task_id:
@@ -236,7 +201,7 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
                 (attempt_id,),
             )
             attempt = store._conn.execute(
-                "SELECT task_id,kind,generation,status,ended_at FROM attempts WHERE attempt_id=?",
+                "SELECT task_id,kind,generation,status,ended_at,started_at FROM attempts WHERE attempt_id=?",
                 (attempt_id,),
             ).fetchone()
 
@@ -244,15 +209,15 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
             raise RuntimeSafetyError(
                 f"attempt is not launchable from status {attempt['status']!r}"
             )
-
-        _assert_attempt_stage_compatible(
-            task_stage=task["stage"],
-            task_generation=int(task["current_generation"]),
-            attempt_kind=attempt["kind"],
-            attempt_generation=(
-                None if attempt["generation"] is None else int(attempt["generation"])
-            ),
-        )
+        if attempt["started_at"] is None:
+            raise RuntimeSafetyError("attempt has no durable allocation timestamp")
+        # Attempt allocation snapshots the current task epoch implicitly: normal providers
+        # allocate and immediately launch. Any task mutation after that allocation makes the
+        # attempt stale, regardless of stage names or provider kind. This prevents delayed
+        # callers from launching after cancellation/stage advance without coupling the
+        # supervisor to the workflow enum or blocking standalone provider-component tests.
+        if task["updated_at"] > attempt["started_at"]:
+            raise RuntimeSafetyError("task workflow state changed since attempt allocation")
 
         if attempt["kind"] == "writer":
             active = store._conn.execute(
@@ -350,7 +315,6 @@ def verify_launch_claim_owned_by_current_process(store: Store, *, attempt_id: in
         """
         SELECT lc.*, t.stage AS current_stage, t.updated_at AS current_updated_at,
                t.current_generation AS current_generation,
-               a.kind AS attempt_kind, a.generation AS attempt_generation,
                a.status AS attempt_status, a.ended_at AS attempt_ended_at
         FROM launch_claims lc
         JOIN tasks t ON t.task_id=lc.task_id
@@ -377,14 +341,6 @@ def verify_launch_claim_owned_by_current_process(store: Store, *, attempt_id: in
         or row["expected_generation"] != row["current_generation"]
     ):
         raise RuntimeSafetyError("task workflow state changed before process publication")
-    _assert_attempt_stage_compatible(
-        task_stage=row["current_stage"],
-        task_generation=int(row["current_generation"]),
-        attempt_kind=row["attempt_kind"],
-        attempt_generation=(
-            None if row["attempt_generation"] is None else int(row["attempt_generation"])
-        ),
-    )
 
 
 def authorize_launch_claim_in_transaction(store: Store, *, attempt_id: int) -> None:

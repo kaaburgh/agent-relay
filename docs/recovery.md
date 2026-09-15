@@ -30,6 +30,20 @@ If a separately running validator finishes while the orchestrator is absent, reo
 
 If the durable process is dead but evidence is incomplete, the state is ambiguous. Recovery creates no successful validation and intentionally retains the lease instead of risking a second expensive runtime overlapping an uncertain first run.
 
+## Real-provider crash I/O boundary
+
+Durable launch authorization does not by itself make provider stdin/stdout/stderr survive orchestrator death. The current local supervisor still owns those pipe endpoints. An authorized provider may therefore see EOF/partial stdin or lose captured terminal output if the orchestrator process or machine dies while it is running.
+
+Until a crash-surviving real-provider I/O/completion protocol is implemented:
+
+- `authorized_at`, a dead process, or a candidate commit alone must never prove provider success;
+- automatic recovery requires the provider-specific durable terminal evidence expected by that recovery path;
+- when that evidence is missing after orchestrator loss, recovery remains ambiguous/fail-closed and explicit local/operator recovery is allowed;
+- this limitation is acceptable while ordinary unattended real-provider `agent-relay run` is not enabled;
+- enabling unattended real Codex/Claude orchestration requires a crash-surviving input/output/completion contract first.
+
+Track the implementation work in issue #37 together with the related real-provider recovery boundaries (#14 and #18). This is intentionally not a merge blocker for PR #28.
+
 ## Provider retry
 
 Temporary quota/rate-limit/unavailability enters `WAITING_PROVIDER` with durable first/last timestamps, attempt count and next retry. Retry uses bounded exponential backoff and resumes the interrupted stage only when due. Wait metadata is cleared only after provider success; history remains in events.

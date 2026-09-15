@@ -80,6 +80,12 @@ def reconcile_writer_attempt(
     if live:
         return WriterRecoveryResult("RUNNING", attempt_id, None)
 
+    if process is not None and process["state"] != "RUNNING":
+        if process["state"] != "SUCCEEDED" or process["exit_status"] not in {0, None}:
+            raise WriterRecoveryError(
+                f"writer process is terminal as {process['state']!r}; recovery cannot promote it to success"
+            )
+
     try:
         candidate_sha = git.detect_candidate(writer_worktree, baseline_sha)
     except Exception as exc:
@@ -97,6 +103,10 @@ def reconcile_writer_attempt(
                 WHERE process_id=? AND state='RUNNING'
                 """,
                 (recovered_now, recovered_now, process["process_id"]),
+            )
+            store._conn.execute(
+                "DELETE FROM launch_claims WHERE attempt_id=?",
+                (attempt_id,),
             )
 
     # A real SubprocessSupervisor.start() changes the attempt to RUNNING before the worker
@@ -116,8 +126,10 @@ def reconcile_writer_attempt(
             },
             exit_status=0,
         )
-    elif current_attempt.status == "CANCELLED":
-        raise WriterRecoveryError("cancelled writer attempt cannot be recovered as success")
+    elif current_attempt.status != "SUCCESS":
+        raise WriterRecoveryError(
+            f"terminal writer attempt {current_attempt.status!r} cannot be recovered as success"
+        )
 
     existing = store._conn.execute(
         """

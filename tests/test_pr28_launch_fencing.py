@@ -88,7 +88,7 @@ class PullRequest28LaunchFencingTests(unittest.TestCase):
         attempt_id = self._writer_attempt()
         WorkflowStateMachine(self.store).transition("task-1", WorkflowStage.VALIDATE)
 
-        with self.assertRaisesRegex(RuntimeSafetyError, "writer attempt cannot launch"):
+        with self.assertRaisesRegex(RuntimeSafetyError, "workflow state changed"):
             claim_attempt_launch(self.store, task_id="task-1", attempt_id=attempt_id)
 
         self.assertEqual(self.store.get_attempt(attempt_id).status, "CREATED")

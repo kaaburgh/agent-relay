@@ -21,6 +21,22 @@ class ProcessIdentity:
     session_id: int
 
 
+def _ensure_launch_claim_columns(store: Store) -> None:
+    columns = {
+        row["name"]
+        for row in store._conn.execute("PRAGMA table_info(launch_claims)").fetchall()
+    }
+    additions = {
+        "expected_task_stage": "TEXT",
+        "expected_task_updated_at": "TEXT",
+        "expected_generation": "INTEGER",
+        "authorized_at": "TEXT",
+    }
+    for name, sql_type in additions.items():
+        if name not in columns:
+            store._conn.execute(f"ALTER TABLE launch_claims ADD COLUMN {name} {sql_type}")
+
+
 def ensure_runtime_safety_guards(store: Store) -> None:
     """Install durable runtime guards without changing semantic event history.
 
@@ -47,10 +63,15 @@ def ensure_runtime_safety_guards(store: Store) -> None:
                 owner_pid INTEGER NOT NULL,
                 owner_boot_id TEXT NOT NULL,
                 owner_start_time_ticks INTEGER NOT NULL,
-                claimed_at TEXT NOT NULL
+                claimed_at TEXT NOT NULL,
+                expected_task_stage TEXT,
+                expected_task_updated_at TEXT,
+                expected_generation INTEGER,
+                authorized_at TEXT
             )
             """
         )
+        _ensure_launch_claim_columns(store)
         store._conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_writer_owner
@@ -143,17 +164,53 @@ def pid_matches_identity(pid: int, *, boot_id: str, start_time_ticks: int) -> bo
     return state != "Z" and observed_start == start_time_ticks
 
 
+def _assert_attempt_stage_compatible(
+    *,
+    task_stage: str,
+    task_generation: int,
+    attempt_kind: str,
+    attempt_generation: int | None,
+) -> None:
+    """Reject stale built-in attempts before they can acquire side-effecting ownership."""
+    if attempt_kind == "writer":
+        if task_stage == "WORK":
+            if task_generation != 0 or attempt_generation is not None:
+                raise RuntimeSafetyError("initial writer attempt does not match WORK generation")
+            return
+        if task_stage == "REWORK":
+            if task_generation <= 0 or attempt_generation != task_generation:
+                raise RuntimeSafetyError("rework writer attempt does not match current generation")
+            return
+        raise RuntimeSafetyError(f"writer attempt cannot launch while task is {task_stage}")
+
+    if attempt_kind == "validation":
+        if task_stage != "VALIDATE":
+            raise RuntimeSafetyError(
+                f"validation attempt cannot launch while task is {task_stage}"
+            )
+        if task_generation <= 0 or attempt_generation != task_generation:
+            raise RuntimeSafetyError("validation attempt does not match current generation")
+        return
+
+    if attempt_kind == "reviewer":
+        if task_stage != "REVIEW":
+            raise RuntimeSafetyError(f"reviewer attempt cannot launch while task is {task_stage}")
+        if task_generation <= 0 or attempt_generation != task_generation:
+            raise RuntimeSafetyError("reviewer attempt does not match current generation")
+
+
 def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None:
     """Durably claim one attempt before any side-effecting command can exec."""
     owner = capture_process_identity(os.getpid())
     with store._transaction():
         task = store._conn.execute(
-            "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)
+            "SELECT stage,updated_at,current_generation FROM tasks WHERE task_id=?",
+            (task_id,),
         ).fetchone()
         if task is None:
             raise RuntimeSafetyError(f"unknown task: {task_id}")
         attempt = store._conn.execute(
-            "SELECT task_id,kind,status,ended_at FROM attempts WHERE attempt_id=?",
+            "SELECT task_id,kind,generation,status,ended_at FROM attempts WHERE attempt_id=?",
             (attempt_id,),
         ).fetchone()
         if attempt is None or attempt["task_id"] != task_id:
@@ -171,13 +228,15 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
                 start_time_ticks=int(claim["owner_start_time_ticks"]),
             ):
                 raise RuntimeSafetyError("attempt already has a live launch owner")
+            if claim is not None and claim["authorized_at"] is not None:
+                raise RuntimeSafetyError("authorized launch ownership cannot be reclaimed speculatively")
             store._conn.execute("DELETE FROM launch_claims WHERE attempt_id=?", (attempt_id,))
             store._conn.execute(
                 "UPDATE attempts SET status='CREATED' WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL",
                 (attempt_id,),
             )
             attempt = store._conn.execute(
-                "SELECT task_id,kind,status,ended_at FROM attempts WHERE attempt_id=?",
+                "SELECT task_id,kind,generation,status,ended_at FROM attempts WHERE attempt_id=?",
                 (attempt_id,),
             ).fetchone()
 
@@ -185,6 +244,16 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
             raise RuntimeSafetyError(
                 f"attempt is not launchable from status {attempt['status']!r}"
             )
+
+        _assert_attempt_stage_compatible(
+            task_stage=task["stage"],
+            task_generation=int(task["current_generation"]),
+            attempt_kind=attempt["kind"],
+            attempt_generation=(
+                None if attempt["generation"] is None else int(attempt["generation"])
+            ),
+        )
+
         if attempt["kind"] == "writer":
             active = store._conn.execute(
                 """
@@ -209,8 +278,9 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
         store._conn.execute(
             """
             INSERT INTO launch_claims(
-                attempt_id,task_id,owner_pid,owner_boot_id,owner_start_time_ticks,claimed_at
-            ) VALUES (?,?,?,?,?,?)
+                attempt_id,task_id,owner_pid,owner_boot_id,owner_start_time_ticks,claimed_at,
+                expected_task_stage,expected_task_updated_at,expected_generation,authorized_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,NULL)
             """,
             (
                 attempt_id,
@@ -219,6 +289,9 @@ def claim_attempt_launch(store: Store, *, task_id: str, attempt_id: int) -> None
                 owner.boot_id,
                 owner.start_time_ticks,
                 utc_now(),
+                task["stage"],
+                task["updated_at"],
+                int(task["current_generation"]),
             ),
         )
 
@@ -239,30 +312,103 @@ def release_attempt_launch_claim(store: Store, *, task_id: str, attempt_id: int)
             or int(claim["owner_start_time_ticks"]) != owner.start_time_ticks
         ):
             raise RuntimeSafetyError("cannot release another process's launch claim")
+        if claim["authorized_at"] is not None:
+            raise RuntimeSafetyError("cannot roll back an already-authorized launch claim")
+
+        task = store._conn.execute(
+            "SELECT stage,updated_at,current_generation FROM tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
         store._conn.execute("DELETE FROM launch_claims WHERE attempt_id=?", (attempt_id,))
+        if task is None:
+            return
+        snapshot_matches = (
+            claim["expected_task_stage"] == task["stage"]
+            and claim["expected_task_updated_at"] == task["updated_at"]
+            and claim["expected_generation"] == task["current_generation"]
+        )
+        if snapshot_matches:
+            store._conn.execute(
+                "UPDATE attempts SET status='CREATED' WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL",
+                (attempt_id,),
+            )
+            return
+
+        terminal_status = "CANCELLED" if task["stage"] == "CANCELLED" else "STALE_LAUNCH"
         store._conn.execute(
-            "UPDATE attempts SET status='CREATED' WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL",
-            (attempt_id,),
+            """
+            UPDATE attempts SET status=?,ended_at=?
+            WHERE attempt_id=? AND status='LAUNCHING' AND ended_at IS NULL
+            """,
+            (terminal_status, utc_now(), attempt_id),
         )
 
 
 def verify_launch_claim_owned_by_current_process(store: Store, *, attempt_id: int) -> None:
     owner = capture_process_identity(os.getpid())
-    claim = store._conn.execute(
-        "SELECT * FROM launch_claims WHERE attempt_id=?", (attempt_id,)
+    row = store._conn.execute(
+        """
+        SELECT lc.*, t.stage AS current_stage, t.updated_at AS current_updated_at,
+               t.current_generation AS current_generation,
+               a.kind AS attempt_kind, a.generation AS attempt_generation,
+               a.status AS attempt_status, a.ended_at AS attempt_ended_at
+        FROM launch_claims lc
+        JOIN tasks t ON t.task_id=lc.task_id
+        JOIN attempts a ON a.attempt_id=lc.attempt_id
+        WHERE lc.attempt_id=?
+        """,
+        (attempt_id,),
     ).fetchone()
-    if claim is None:
+    if row is None:
         raise RuntimeSafetyError("launch claim disappeared before process publication")
     if (
-        int(claim["owner_pid"]) != os.getpid()
-        or claim["owner_boot_id"] != owner.boot_id
-        or int(claim["owner_start_time_ticks"]) != owner.start_time_ticks
+        int(row["owner_pid"]) != os.getpid()
+        or row["owner_boot_id"] != owner.boot_id
+        or int(row["owner_start_time_ticks"]) != owner.start_time_ticks
     ):
         raise RuntimeSafetyError("launch claim ownership changed before process publication")
+    if row["authorized_at"] is not None:
+        raise RuntimeSafetyError("launch claim is already authorized")
+    if row["attempt_ended_at"] is not None or row["attempt_status"] != "LAUNCHING":
+        raise RuntimeSafetyError("attempt launch state changed before process publication")
+    if (
+        row["expected_task_stage"] != row["current_stage"]
+        or row["expected_task_updated_at"] != row["current_updated_at"]
+        or row["expected_generation"] != row["current_generation"]
+    ):
+        raise RuntimeSafetyError("task workflow state changed before process publication")
+    _assert_attempt_stage_compatible(
+        task_stage=row["current_stage"],
+        task_generation=int(row["current_generation"]),
+        attempt_kind=row["attempt_kind"],
+        attempt_generation=(
+            None if row["attempt_generation"] is None else int(row["attempt_generation"])
+        ),
+    )
 
 
-def clear_launch_claim_in_transaction(store: Store, *, attempt_id: int) -> None:
-    store._conn.execute("DELETE FROM launch_claims WHERE attempt_id=?", (attempt_id,))
+def authorize_launch_claim_in_transaction(store: Store, *, attempt_id: int) -> None:
+    if not store._conn.in_transaction:
+        raise RuntimeSafetyError("launch authorization requires an active store transaction")
+    verify_launch_claim_owned_by_current_process(store, attempt_id=attempt_id)
+    cursor = store._conn.execute(
+        "UPDATE launch_claims SET authorized_at=? WHERE attempt_id=? AND authorized_at IS NULL",
+        (utc_now(), attempt_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeSafetyError("launch claim changed before authorization")
+
+
+def clear_launch_claim_for_process_in_transaction(store: Store, *, process_id: int) -> None:
+    if not store._conn.in_transaction:
+        raise RuntimeSafetyError("launch-claim cleanup requires an active store transaction")
+    store._conn.execute(
+        """
+        DELETE FROM launch_claims
+        WHERE attempt_id=(SELECT attempt_id FROM processes WHERE process_id=?)
+        """,
+        (process_id,),
+    )
 
 
 def persist_process_identity(

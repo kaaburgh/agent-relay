@@ -17,7 +17,7 @@ from agent_relay.runtime_safety import (
 )
 from agent_relay.store import Store, utc_now
 from agent_relay.workflow import WorkflowStage, WorkflowStateMachine
-from agent_relay.writer_recovery import reconcile_writer_attempt
+from agent_relay.writer_recovery import WriterRecoveryError, reconcile_writer_attempt
 
 
 class WriterRecoveryTests(unittest.TestCase):
@@ -195,6 +195,72 @@ class WriterRecoveryTests(unittest.TestCase):
         event_types = [event.event_type for event in self.store.events("task-1")]
         self.assertEqual(event_types.count("candidate_commit_detected"), 1)
         self.assertEqual(event_types.count("writer_recovered"), 1)
+
+    def test_capture_failed_process_cannot_be_promoted_to_recovered_candidate(self) -> None:
+        behavior = [
+            {"modify_file": {"path": "example.txt", "content": "must not publish\n"}},
+            {"commit": {"message": "candidate before capture failure"}},
+            {"result": {"status": "success", "handoff": "looks-good"}},
+        ]
+        layout = self.artifacts.create_attempt(
+            task_id="task-1",
+            kind="writer",
+            inputs={"behavior": behavior, "baseline_sha": self.workspaces.baseline_sha},
+            command=["simulated-writer-detached"],
+        )
+        script = layout.directory / "writer-behavior.json"
+        provider_result = layout.directory / "provider-result.json"
+        script.write_text(json.dumps(behavior), encoding="utf-8")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_relay.simulated_writer_worker",
+                "--script",
+                str(script),
+                "--worktree",
+                str(self.workspaces.writer),
+                "--result",
+                str(provider_result),
+            ],
+            cwd=self.workspaces.writer,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertTrue(provider_result.exists())
+        now = utc_now()
+        with self.store._transaction():
+            self.store._conn.execute(
+                """
+                INSERT INTO processes(
+                    task_id,attempt_id,pid,process_group_id,state,command_json,
+                    started_at,ended_at,exit_status,last_liveness_at
+                ) VALUES (?,?,1,1,'CAPTURE_FAILED','[]',?,?,0,?)
+                """,
+                ("task-1", layout.attempt.attempt_id, now, now, now),
+            )
+            self.store._conn.execute(
+                "UPDATE attempts SET status='RUNNING',pid=1 WHERE attempt_id=?",
+                (layout.attempt.attempt_id,),
+            )
+
+        with self.assertRaisesRegex(WriterRecoveryError, "CAPTURE_FAILED"):
+            reconcile_writer_attempt(
+                self.store,
+                artifact_root=self.artifact_root,
+                git=self.git,
+                task_id="task-1",
+                writer_worktree=self.workspaces.writer,
+                baseline_sha=self.workspaces.baseline_sha,
+                attempt_id=layout.attempt.attempt_id,
+                expected_previous_generation=0,
+            )
+
+        self.assertEqual(candidate_generations(self.store, "task-1"), ())
+        self.assertEqual(self.store.get_attempt(layout.attempt.attempt_id).status, "RUNNING")
 
 
 if __name__ == "__main__":

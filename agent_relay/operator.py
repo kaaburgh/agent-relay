@@ -362,6 +362,7 @@ def _terminate_owned_process_group(
         if not _process_group_alive(group):
             return sent_term, sent_kill
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
     if _process_group_alive(group):
         ownership = process_ownership_state(store, row)
         if ownership == "LIVE":
@@ -369,11 +370,24 @@ def _terminate_owned_process_group(
                 os.killpg(group, signal.SIGKILL)
                 sent_kill = True
             except ProcessLookupError:
-                pass
-        elif ownership != "DEAD":
+                return sent_term, sent_kill
+        else:
             raise OperatorError(
-                f"refusing SIGKILL for process {row['process_id']}: ownership changed to {ownership}"
+                f"cannot prove process group {group} is safe to release for process "
+                f"{row['process_id']}: ownership is {ownership}"
             )
+
+    kill_deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < kill_deadline:
+        if not _process_group_alive(group):
+            return sent_term, sent_kill
+        time.sleep(min(0.02, max(0.0, kill_deadline - time.monotonic())))
+    if _process_group_alive(group):
+        ownership = process_ownership_state(store, row)
+        raise OperatorError(
+            f"process group {group} for process {row['process_id']} remains alive after SIGKILL; "
+            f"ownership is {ownership}; refusing cancellation closeout"
+        )
     return sent_term, sent_kill
 
 

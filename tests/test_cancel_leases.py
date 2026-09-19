@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_relay.models import RunnerConfig
-from agent_relay.operator import cancel_task
+from agent_relay.operator import OperatorError, cancel_task
 from agent_relay.resource_leases import acquire_lease, active_leases, configure_resource
 from agent_relay.ssh_runner import SSHExternalToolRunner
 from agent_relay.store import Store
@@ -92,6 +95,48 @@ class CancelLeaseTests(unittest.TestCase):
                 attempt_id=next_attempt.attempt_id,
             )
             self.assertIsNone(next_lease.released_at)
+
+        asyncio.run(scenario())
+
+    def test_cancel_retains_lease_if_group_remains_alive_after_sigkill(self) -> None:
+        async def scenario() -> None:
+            attempt, lease = self._create_task_attempt("task-stuck-local")
+            managed = await SubprocessSupervisor(self.store).start(
+                task_id="task-stuck-local",
+                attempt_id=attempt.attempt_id,
+                argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+                cwd=self.root,
+                stdout_path=self.root / "stuck-local.out",
+                stderr_path=self.root / "stuck-local.err",
+                timeout_seconds=10,
+                terminate_grace_seconds=0.1,
+            )
+
+            try:
+                with (
+                    mock.patch("agent_relay.operator._process_group_alive", return_value=True),
+                    mock.patch("agent_relay.operator.os.killpg") as killpg,
+                ):
+                    with self.assertRaisesRegex(OperatorError, "remains alive after SIGKILL"):
+                        cancel_task(self.store, "task-stuck-local", grace_seconds=0.01)
+                    killpg.assert_any_call(managed.process_group_id, signal.SIGTERM)
+                    killpg.assert_any_call(managed.process_group_id, signal.SIGKILL)
+
+                remaining = active_leases(self.store, "runtime")
+                self.assertEqual(len(remaining), 1)
+                self.assertEqual(remaining[0].lease_id, lease.lease_id)
+                process_row = self.store._conn.execute(
+                    "SELECT state,ended_at FROM processes WHERE process_id=?",
+                    (managed.process_id,),
+                ).fetchone()
+                self.assertEqual(process_row["state"], "RUNNING")
+                self.assertIsNone(process_row["ended_at"])
+                self.assertIsNone(self.store.get_attempt(attempt.attempt_id).ended_at)
+                self.assertNotEqual(self.store.get_task("task-stuck-local").stage, "CANCELLED")
+            finally:
+                if managed.process.returncode is None:
+                    os.killpg(managed.process_group_id, signal.SIGKILL)
+                await managed.wait()
 
         asyncio.run(scenario())
 

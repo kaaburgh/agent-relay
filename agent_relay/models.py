@@ -11,7 +11,8 @@ class ConfigError(ValueError):
 
 
 _SENSITIVE_ENV_KEY = re.compile(
-    r"(?:password|passwd|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|access[_-]?key)",
+    r"(?:^|[_-])(?:password|passwd|token|secret|authorization|cookie)(?:$|[_-])"
+    r"|(?:^|[_-])(?:api|private|access)[_-]?key(?:$|[_-])",
     re.IGNORECASE,
 )
 _INLINE_SECRET_VALUE = re.compile(

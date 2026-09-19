@@ -74,10 +74,15 @@ workspace:
             name="tests",
             runner="local",
             argv=("python", "-m", "unittest"),
-            env={"LOG_LEVEL": "debug", "FEATURE_MODE": "strict"},
+            env={
+                "LOG_LEVEL": "debug",
+                "FEATURE_MODE": "strict",
+                "TOKENIZERS_PARALLELISM": "false",
+            },
         )
         self.assertEqual(step.env["LOG_LEVEL"], "debug")
         self.assertEqual(step.env["FEATURE_MODE"], "strict")
+        self.assertEqual(step.env["TOKENIZERS_PARALLELISM"], "false")
 
 
 if __name__ == "__main__":

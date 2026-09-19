@@ -459,6 +459,7 @@ class SubprocessSupervisor:
 
         environment = os.environ.copy()
         environment.update(dict(env_additions or {}))
+        started_monotonic = time.monotonic()
         started_at = utc_now()
         gate_read_fd: int | None = None
         gate_write_fd: int | None = None
@@ -547,7 +548,6 @@ class SubprocessSupervisor:
                 )
             )
 
-        started_monotonic = time.monotonic()
         process_group_id = int(process.pid)
         safe_command = redact(list(argv))
         try:
@@ -626,6 +626,30 @@ class SubprocessSupervisor:
                     pass
             raise
 
+        managed = ManagedProcess(
+            store=self.store,
+            process_id=process_id,
+            process=process,
+            process_group_id=process_group_id,
+            capture_tasks=tuple(capture_tasks),
+            capture_streams=tuple(capture_streams),
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            timeout_seconds=timeout_seconds,
+            terminate_grace_seconds=terminate_grace_seconds,
+            heartbeat_interval=heartbeat_interval,
+        )
+
+        deadline = managed.timeout_deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            await managed.expire_timeout()
+            if gate_write_fd is not None:
+                try:
+                    os.close(gate_write_fd)
+                except OSError:
+                    pass
+            return managed
+
         if gate_write_fd is not None:
             try:
                 os.write(gate_write_fd, b"1")
@@ -654,11 +678,28 @@ class SubprocessSupervisor:
                     capture_tasks=capture_tasks,
                 )
                 raise SupervisorError("subprocess stdin pipe was not created")
-            try:
+
+            async def deliver_stdin() -> None:
+                assert process.stdin is not None
                 process.stdin.write(stdin_text.encode("utf-8"))
                 await process.stdin.drain()
                 process.stdin.close()
                 await process.stdin.wait_closed()
+
+            try:
+                if deadline is None:
+                    await deliver_stdin()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        await managed.expire_timeout()
+                        process.stdin.close()
+                        return managed
+                    await asyncio.wait_for(deliver_stdin(), timeout=remaining)
+            except asyncio.TimeoutError:
+                process.stdin.close()
+                await managed.expire_timeout()
+                return managed
             except (BrokenPipeError, ConnectionResetError) as exc:
                 await self._mark_launch_failure(
                     process=process,
@@ -669,16 +710,4 @@ class SubprocessSupervisor:
                 )
                 raise SupervisorError("subprocess exited before stdin could be delivered") from exc
 
-        return ManagedProcess(
-            store=self.store,
-            process_id=process_id,
-            process=process,
-            process_group_id=process_group_id,
-            capture_tasks=tuple(capture_tasks),
-            capture_streams=tuple(capture_streams),
-            started_at=started_at,
-            started_monotonic=started_monotonic,
-            timeout_seconds=timeout_seconds,
-            terminate_grace_seconds=terminate_grace_seconds,
-            heartbeat_interval=heartbeat_interval,
-        )
+        return managed

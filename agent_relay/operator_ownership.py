@@ -60,8 +60,13 @@ def process_ownership_state(store: Store, process_row: Any) -> OwnershipState:
     if identity is None:
         return "UNVERIFIED"
     current_boot = _boot_id()
-    if current_boot is None or current_boot != identity.boot_id:
-        return "MISMATCH"
+    if current_boot is None:
+        return "UNVERIFIED"
+    if current_boot != identity.boot_id:
+        # A local process from another Linux boot cannot still be alive. Treat this as
+        # conclusively dead ownership, not a same-boot identity mismatch. Operator cancel
+        # can therefore close stale durable state without ever signalling a reused PID/PGID.
+        return "DEAD"
 
     pid = int(process_row["pid"])
     stat = _stat(pid)

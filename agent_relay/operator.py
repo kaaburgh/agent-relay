@@ -20,7 +20,7 @@ from .evidence import latest_review, latest_validation
 from .models import ConfigError, GlobalConfig, ProviderConfig, TaskSpec
 from .operator_ownership import process_ownership_state
 from .provider_retry import get_provider_wait, resume_provider_if_due
-from .resource_leases import active_leases, configure_resource
+from .resource_leases import active_leases, configure_resource, release_lease
 from .store import Store, StoreError, TaskNotFound, TaskRow, utc_now
 from .workflow import WorkflowStage, WorkflowStateMachine
 
@@ -362,6 +362,7 @@ def _terminate_owned_process_group(
         if not _process_group_alive(group):
             return sent_term, sent_kill
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
     if _process_group_alive(group):
         ownership = process_ownership_state(store, row)
         if ownership == "LIVE":
@@ -369,12 +370,49 @@ def _terminate_owned_process_group(
                 os.killpg(group, signal.SIGKILL)
                 sent_kill = True
             except ProcessLookupError:
-                pass
-        elif ownership != "DEAD":
+                return sent_term, sent_kill
+        else:
             raise OperatorError(
-                f"refusing SIGKILL for process {row['process_id']}: ownership changed to {ownership}"
+                f"cannot prove process group {group} is safe to release for process "
+                f"{row['process_id']}: ownership is {ownership}"
             )
+
+    kill_deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < kill_deadline:
+        if not _process_group_alive(group):
+            return sent_term, sent_kill
+        time.sleep(min(0.02, max(0.0, kill_deadline - time.monotonic())))
+    if _process_group_alive(group):
+        ownership = process_ownership_state(store, row)
+        raise OperatorError(
+            f"process group {group} for process {row['process_id']} remains alive after SIGKILL; "
+            f"ownership is {ownership}; refusing cancellation closeout"
+        )
     return sent_term, sent_kill
+
+
+def _cancelled_process_is_remote_transport(row: Any) -> tuple[bool, str]:
+    try:
+        command = json.loads(row["command_json"])
+    except (TypeError, json.JSONDecodeError):
+        return True, "process-command-unavailable"
+    if not isinstance(command, list) or not command or any(not isinstance(item, str) for item in command):
+        return True, "process-command-unavailable"
+
+    executable = command[0]
+    for index in range(len(command) - 2, -1, -1):
+        if command[index] == "--" and index + 1 < len(command):
+            executable = command[index + 1]
+            break
+    ssh_transport_shape = (
+        "-T" in command
+        and "BatchMode=yes" in command
+        and len(command) >= 2
+        and command[-2:] == ["sh", "-s"]
+    )
+    if Path(executable).name == "ssh" or ssh_transport_shape:
+        return True, "remote-ssh-transport"
+    return False, "local-process-terminated"
 
 
 def cancel_task(store: Store, task_id: str, *, grace_seconds: float = 5.0) -> dict[str, Any]:
@@ -399,6 +437,7 @@ def cancel_task(store: Store, task_id: str, *, grace_seconds: float = 5.0) -> di
             )
 
     terminated: list[dict[str, Any]] = []
+    cancelled_processes_by_attempt: dict[int, Any] = {}
     for row in rows:
         sent_term, sent_kill = _terminate_owned_process_group(store, row, grace_seconds)
         now = utc_now()
@@ -413,10 +452,12 @@ def cancel_task(store: Store, task_id: str, *, grace_seconds: float = 5.0) -> di
             )
         attempt_id = row["attempt_id"]
         if attempt_id is not None:
-            attempt = store.get_attempt(int(attempt_id))
+            attempt_key = int(attempt_id)
+            cancelled_processes_by_attempt[attempt_key] = row
+            attempt = store.get_attempt(attempt_key)
             if attempt.ended_at is None:
                 store.finish_attempt(
-                    attempt_id=int(attempt_id),
+                    attempt_id=attempt_key,
                     status="CANCELLED",
                     result={"reason": "operator cancellation"},
                     exit_status=None,
@@ -430,15 +471,67 @@ def cancel_task(store: Store, task_id: str, *, grace_seconds: float = 5.0) -> di
             }
         )
 
+    released_leases: list[dict[str, Any]] = []
+    retained_leases: list[dict[str, Any]] = []
+    for lease in active_leases(store):
+        if lease.task_id != task_id:
+            continue
+        process_row = (
+            cancelled_processes_by_attempt.get(int(lease.attempt_id))
+            if lease.attempt_id is not None
+            else None
+        )
+        if process_row is None:
+            retained_leases.append(
+                {
+                    "lease_id": lease.lease_id,
+                    "resource": lease.resource_name,
+                    "attempt_id": lease.attempt_id,
+                    "reason": "no-cancelled-process-proof",
+                }
+            )
+            continue
+        remote, reason = _cancelled_process_is_remote_transport(process_row)
+        if remote:
+            retained_leases.append(
+                {
+                    "lease_id": lease.lease_id,
+                    "resource": lease.resource_name,
+                    "attempt_id": lease.attempt_id,
+                    "reason": reason,
+                }
+            )
+            continue
+        released = release_lease(
+            store,
+            lease_id=lease.lease_id,
+            holder_id=lease.holder_id,
+        )
+        released_leases.append(
+            {
+                "lease_id": released.lease_id,
+                "resource": released.resource_name,
+                "attempt_id": released.attempt_id,
+                "reason": reason,
+            }
+        )
+
     final = WorkflowStateMachine(store).transition(
         task_id,
         WorkflowStage.CANCELLED,
         event_type="task_cancelled",
-        payload={"operator": True, "terminated_processes": len(terminated)},
+        payload={
+            "operator": True,
+            "terminated_processes": len(terminated),
+            "released_leases": len(released_leases),
+            "retained_leases": len(retained_leases),
+        },
     )
     return {
         "action": "cancelled",
         "terminated_processes": terminated,
+        "released_leases": released_leases,
+        "retained_leases": retained_leases,
         "stage": final.stage,
         "status": task_status(store, task_id),
     }

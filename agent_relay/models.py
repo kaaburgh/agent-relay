@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -7,6 +8,24 @@ from typing import Any, Mapping
 
 class ConfigError(ValueError):
     """Raised when a task or global configuration is invalid."""
+
+
+_SENSITIVE_ENV_KEY = re.compile(
+    r"(?:password|passwd|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|access[_-]?key)",
+    re.IGNORECASE,
+)
+_INLINE_SECRET_VALUE = re.compile(
+    r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|access[_-]?key)=([^\s]+)"
+)
+_BEARER_SECRET_VALUE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+
+
+def _credential_shaped_env(key: str, value: str) -> bool:
+    return bool(
+        _SENSITIVE_ENV_KEY.search(key)
+        or _INLINE_SECRET_VALUE.search(value)
+        or _BEARER_SECRET_VALUE.search(value)
+    )
 
 
 def _mapping(value: Any, path: str) -> Mapping[str, Any]:
@@ -167,6 +186,16 @@ class ValidationStep:
     timeout_seconds: float | None = None
     resources: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for key, value in self.env.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ConfigError("validation env must be a string-to-string mapping")
+            if _credential_shaped_env(key, value):
+                raise ConfigError(
+                    "validation env must not contain credential-shaped literal values; "
+                    "provide secrets through the inherited agent-relay process environment instead"
+                )
 
     @classmethod
     def from_mapping(cls, value: Any, path: str) -> "ValidationStep":

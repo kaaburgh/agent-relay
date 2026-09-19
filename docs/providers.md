@@ -55,6 +55,8 @@ runners:
 
 External adapters still own their command/evidence contracts.
 
+Validation `env` entries are durable task configuration and are appropriate only for non-secret values such as feature flags or log levels. Credential-shaped literal keys or values are rejected before task persistence. Secrets must instead be supplied in the environment of the `agent-relay` process (or by an already-authenticated CLI); supervised local children inherit that environment without copying the secret into task YAML or SQLite. A service/restart deployment is responsible for supplying the same external secret environment again.
+
 ## SSH external-tool transport
 
 Minimal remote configuration:

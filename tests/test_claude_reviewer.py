@@ -14,7 +14,7 @@ from agent_relay.git_workspace import GitWorkspaceManager
 from agent_relay.models import ProviderConfig
 from agent_relay.review_package import build_review_package
 from agent_relay.store import Store
-from agent_relay.supervisor import SubprocessSupervisor
+from agent_relay.supervisor import DEFAULT_MAX_OUTPUT_BYTES, SubprocessSupervisor
 from agent_relay.workflow import ReviewVerdict
 
 
@@ -62,7 +62,7 @@ else:
         "summary": "candidate and deterministic evidence satisfy the criteria",
     }
 
-print(json.dumps({
+payload = {
     "type": "result",
     "subtype": "success",
     "is_error": False,
@@ -74,7 +74,10 @@ print(json.dumps({
         "output_tokens": 45,
         "cache_read_input_tokens": 12,
     },
-}), flush=True)
+}
+if "MODE:large" in stdin:
+    payload["padding"] = "x" * (9 * 1024 * 1024)
+print(json.dumps(payload), flush=True)
 '''
 
 
@@ -214,6 +217,34 @@ class ClaudeReviewerTests(unittest.TestCase):
             self.assertEqual(attempt.status, "SUCCESS")
             self.assertEqual(attempt.result["session_id"], "claude-session-123")
             self.assertEqual(attempt.result["review"]["verdict"], "APPROVE")
+        asyncio.run(scenario())
+
+    def test_oversized_json_uses_complete_protocol_artifact_not_bounded_tail(self) -> None:
+        async def scenario() -> None:
+            result = await self.provider.run(
+                task_id="task-1",
+                reviewer_worktree=self.reviewer,
+                generation=1,
+                candidate_sha=self.candidate_sha,
+                package=self._package("MODE:large"),
+                timeout_seconds=10,
+            )
+            self.assertEqual(result.kind, ClaudeReviewerResultKind.SUCCESS)
+            self.assertEqual(result.review.verdict, ReviewVerdict.APPROVE)
+            self.assertLessEqual(result.stdout_path.stat().st_size, DEFAULT_MAX_OUTPUT_BYTES)
+            self.assertIn(
+                b"earlier output truncated",
+                result.stdout_path.read_bytes()[:128],
+            )
+            artifact = self.store._conn.execute(
+                "SELECT path FROM artifacts WHERE attempt_id=? AND kind='claude_json'",
+                (result.attempt_id,),
+            ).fetchone()
+            self.assertIsNotNone(artifact)
+            protocol = self.artifacts.root / artifact["path"]
+            self.assertGreater(protocol.stat().st_size, DEFAULT_MAX_OUTPUT_BYTES)
+            payload = json.loads(protocol.read_text(encoding="utf-8"))
+            self.assertEqual(payload["session_id"], "claude-session-123")
         asyncio.run(scenario())
 
     def test_request_changes_is_parsed_with_finding(self) -> None:

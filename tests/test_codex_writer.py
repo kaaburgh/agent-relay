@@ -14,7 +14,7 @@ from agent_relay.codex_writer import CodexWriterProvider, CodexWriterResultKind,
 from agent_relay.git_workspace import GitWorkspaceManager
 from agent_relay.models import ProviderConfig
 from agent_relay.store import Store
-from agent_relay.supervisor import SubprocessSupervisor
+from agent_relay.supervisor import DEFAULT_MAX_OUTPUT_BYTES, SubprocessSupervisor
 
 
 FAKE_CODEX = r'''#!/usr/bin/env python3
@@ -60,6 +60,13 @@ if "MODE:no-commit" not in prompt:
     )
 
 event({"type": "thread.started", "thread_id": "thread-123"})
+if "MODE:large" in prompt:
+    filler = "x" * 65536
+    for index in range(140):
+        event({
+            "type": "item.completed",
+            "item": {"id": f"fill-{index}", "type": "command_execution", "text": filler},
+        })
 event({
     "type": "item.completed",
     "item": {"id": "msg-1", "type": "agent_message", "text": "Implemented and committed the change."},
@@ -166,6 +173,35 @@ class CodexWriterTests(unittest.TestCase):
             self.assertEqual(attempt.status, "SUCCESS")
             self.assertEqual(attempt.result["thread_id"], "thread-123")
             self.assertEqual(attempt.result["usage"]["output_tokens"], 40)
+        asyncio.run(scenario())
+
+    def test_oversized_jsonl_uses_complete_protocol_artifact_not_bounded_tail(self) -> None:
+        async def scenario() -> None:
+            result = await self.provider.run(
+                task_id="task-1",
+                writer_worktree=self.workspaces.writer,
+                baseline_sha=self.workspaces.baseline_sha,
+                prompt="MODE:large",
+                timeout_seconds=10,
+            )
+            self.assertEqual(result.kind, CodexWriterResultKind.SUCCESS)
+            self.assertEqual(result.thread_id, "thread-123")
+            self.assertEqual(result.usage["output_tokens"], 40)
+            self.assertLessEqual(result.stdout_path.stat().st_size, DEFAULT_MAX_OUTPUT_BYTES)
+            self.assertIn(
+                b"earlier output truncated",
+                result.stdout_path.read_bytes()[:128],
+            )
+            artifact = self.store._conn.execute(
+                "SELECT path FROM artifacts WHERE attempt_id=? AND kind='codex_jsonl'",
+                (result.attempt_id,),
+            ).fetchone()
+            self.assertIsNotNone(artifact)
+            protocol = self.artifacts.root / artifact["path"]
+            self.assertGreater(protocol.stat().st_size, DEFAULT_MAX_OUTPUT_BYTES)
+            summary = parse_codex_jsonl(protocol)
+            self.assertEqual(summary.thread_id, "thread-123")
+            self.assertEqual(summary.handoff, "Implemented and committed the change.")
         asyncio.run(scenario())
 
     def test_rate_limit_is_provider_unavailable_not_generic_failure(self) -> None:

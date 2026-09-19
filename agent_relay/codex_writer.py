@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -235,10 +236,20 @@ class CodexWriterProvider:
             },
             command=list(argv),
         )
+        protocol_path = layout.directory / "codex-protocol.jsonl"
+        launch_argv = (
+            sys.executable,
+            "-m",
+            "agent_relay.protocol_capture",
+            "--output",
+            str(protocol_path),
+            "--",
+            *argv,
+        )
         process = await self.supervisor.start(
             task_id=task_id,
             attempt_id=layout.attempt.attempt_id,
-            argv=argv,
+            argv=launch_argv,
             cwd=worktree,
             stdout_path=layout.stdout_path,
             stderr_path=layout.stderr_path,
@@ -260,12 +271,20 @@ class CodexWriterProvider:
         attempt_id = invocation.layout.attempt.attempt_id
         stdout = invocation.layout.stdout_path
         stderr = invocation.layout.stderr_path
+        protocol = invocation.layout.directory / "codex-protocol.jsonl"
         self.store.register_artifact(
             task_id=invocation.layout.attempt.task_id,
             attempt_id=attempt_id,
-            kind="codex_jsonl",
+            kind="codex_stdout_tail",
             path=str(stdout.relative_to(self.artifacts.root)),
         )
+        if protocol.exists():
+            self.store.register_artifact(
+                task_id=invocation.layout.attempt.task_id,
+                attempt_id=attempt_id,
+                kind="codex_jsonl",
+                path=str(protocol.relative_to(self.artifacts.root)),
+            )
         self.store.register_artifact(
             task_id=invocation.layout.attempt.task_id,
             attempt_id=attempt_id,
@@ -276,7 +295,7 @@ class CodexWriterProvider:
         summary: CodexStreamSummary | None = None
         parse_error: str | None = None
         try:
-            summary = parse_codex_jsonl(stdout)
+            summary = parse_codex_jsonl(protocol)
         except (OSError, ValueError) as exc:
             parse_error = str(exc)
         stderr_text = stderr.read_text(encoding="utf-8", errors="replace") if stderr.exists() else ""

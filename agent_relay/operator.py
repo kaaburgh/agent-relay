@@ -390,7 +390,13 @@ def _cancelled_process_is_remote_transport(row: Any) -> tuple[bool, str]:
         if command[index] == "--" and index + 1 < len(command):
             executable = command[index + 1]
             break
-    if Path(executable).name == "ssh":
+    ssh_transport_shape = (
+        "-T" in command
+        and "BatchMode=yes" in command
+        and len(command) >= 2
+        and command[-2:] == ["sh", "-s"]
+    )
+    if Path(executable).name == "ssh" or ssh_transport_shape:
         return True, "remote-ssh-transport"
     return False, "local-process-terminated"
 

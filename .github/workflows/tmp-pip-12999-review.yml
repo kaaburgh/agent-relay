@@ -1,0 +1,92 @@
+name: Temporary pip 12999 review probe
+
+on:
+  push:
+    branches:
+      - tmp-pip-12999-tests
+
+permissions:
+  contents: read
+
+jobs:
+  yanked-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out pip branch
+        uses: actions/checkout@v4
+        with:
+          repository: kaaburgh/pip
+          ref: issue-12999-implementation
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install .
+      - run: python -m pip install nox
+      - name: Add review-only regression test
+        shell: bash
+        run: |
+          cat > tests/functional/test_review_12999_yanked.py <<'PY'
+          import shutil
+
+          from tests.lib import (
+              PipTestEnvironment,
+              create_basic_sdist_for_package,
+              create_basic_wheel_for_package,
+          )
+
+
+          def test_only_binary_hint_when_only_wheel_is_yanked(
+              script: PipTestEnvironment,
+          ) -> None:
+              dep_wheel = create_basic_wheel_for_package(
+                  script, "review-dep", "1.0.0"
+              )
+              dep_sdist = create_basic_sdist_for_package(
+                  script, "review-dep", "1.0.0"
+              )
+              parent_wheel = create_basic_wheel_for_package(
+                  script,
+                  "review-parent",
+                  "1.0.0",
+                  depends=["review-dep"],
+              )
+
+              artifacts = script.scratch_path / "artifacts"
+              artifacts.mkdir()
+              for path in (dep_wheel, dep_sdist, parent_wheel):
+                  shutil.move(path, artifacts / path.name)
+
+              page = script.scratch_path / "links.html"
+              page.write_text(
+                  "<html><body>\n"
+                  f'<a data-yanked="review" href="artifacts/{dep_wheel.name}">'
+                  f"{dep_wheel.name}</a>\n"
+                  f'<a href="artifacts/{dep_sdist.name}">{dep_sdist.name}</a>\n'
+                  f'<a href="artifacts/{parent_wheel.name}">{parent_wheel.name}</a>\n'
+                  "</body></html>\n"
+              )
+
+              result = script.pip(
+                  "install",
+                  "--no-cache-dir",
+                  "--no-index",
+                  "--find-links",
+                  page,
+                  "--only-binary",
+                  ":all:",
+                  "review-parent",
+                  expect_error=True,
+              )
+
+              output = result.stderr + result.stdout
+              assert (
+                  "No matching binary distribution was found for review-dep" in output
+              ), str(result)
+          PY
+      - name: Run review probe
+        run: >-
+          python -m nox -s test-3.13 --
+          tests/functional/test_review_12999_yanked.py
+          --verbose --showlocals
